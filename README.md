@@ -163,6 +163,8 @@ At a glance:
 
 - At the checked-in 3-voice benchmark, `ImpSynth` is now about `4.8x-4.9x`
   faster than `Nuked-OPL3`.
+- That `3`-voice case is the practical baseline here because DOOM E1M1 averages
+  about `3` active voices.
 - At `8` active voices, `ImpSynth` remains comfortably ahead at about
   `2.2x-2.3x`.
 - At `18` active voices, the gap is narrow, but `ImpSynth` is still ahead on
