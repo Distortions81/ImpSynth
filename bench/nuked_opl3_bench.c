@@ -11,19 +11,44 @@
 #define DEFAULT_ITERATIONS 2048ULL
 #define DEFAULT_SAMPLE_RATE 49716U
 
+static const int benchmark_channels[] = {0, 1, 2};
+
+static void apply_benchmark_voice(opl3_chip *chip, int ch) {
+    static const uint16_t mod_slots[9] = {0, 1, 2, 8, 9, 10, 16, 17, 18};
+    static const uint16_t car_slots[9] = {3, 4, 5, 11, 12, 13, 19, 20, 21};
+    uint16_t base = 0;
+    int local_ch = ch;
+    uint16_t mod;
+    uint16_t car;
+
+    if (ch >= 9) {
+        base = 0x100;
+        local_ch = ch - 9;
+    }
+
+    mod = mod_slots[local_ch];
+    car = car_slots[local_ch];
+
+    OPL3_WriteReg(chip, base + 0x20 + mod, 0x01);
+    OPL3_WriteReg(chip, base + 0x20 + car, 0x01);
+    OPL3_WriteReg(chip, base + 0x40 + mod, 0x18);
+    OPL3_WriteReg(chip, base + 0x40 + car, 0x00);
+    OPL3_WriteReg(chip, base + 0x60 + mod, 0xF4);
+    OPL3_WriteReg(chip, base + 0x60 + car, 0xF6);
+    OPL3_WriteReg(chip, base + 0x80 + mod, 0x55);
+    OPL3_WriteReg(chip, base + 0x80 + car, 0x14);
+    OPL3_WriteReg(chip, base + 0xC0 + local_ch, 0x30);
+    OPL3_WriteReg(chip, base + 0xA0 + local_ch, 0x98);
+    OPL3_WriteReg(chip, base + 0xB0 + local_ch, 0x31);
+}
+
 static void apply_benchmark_patch(opl3_chip *chip) {
+    size_t i;
+
     OPL3_WriteReg(chip, 0x01, 0x20);
-    OPL3_WriteReg(chip, 0x20, 0x01);
-    OPL3_WriteReg(chip, 0x23, 0x01);
-    OPL3_WriteReg(chip, 0x40, 0x18);
-    OPL3_WriteReg(chip, 0x43, 0x00);
-    OPL3_WriteReg(chip, 0x60, 0xF4);
-    OPL3_WriteReg(chip, 0x63, 0xF6);
-    OPL3_WriteReg(chip, 0x80, 0x55);
-    OPL3_WriteReg(chip, 0x83, 0x14);
-    OPL3_WriteReg(chip, 0xC0, 0x30);
-    OPL3_WriteReg(chip, 0xA0, 0x98);
-    OPL3_WriteReg(chip, 0xB0, 0x31);
+    for (i = 0; i < sizeof(benchmark_channels) / sizeof(benchmark_channels[0]); i++) {
+        apply_benchmark_voice(chip, benchmark_channels[i]);
+    }
 }
 
 static uint64_t monotonic_ns(void) {

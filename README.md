@@ -111,10 +111,15 @@ Benchmark coverage is limited to synth PCM generation and excludes WAV file writ
 For the cross-check against `Nuked-OPL3`, both implementations use the same
 benchmark patch data:
 
+- active voices: `3`
+- benchmark remark: this matches the average number of voices active in DOOM
+  E1M1
 - render size per operation: `2048` stereo `int16` frames
-- register writes: `0x01=0x20`, `0x20=0x01`, `0x23=0x01`, `0x40=0x18`,
-  `0x43=0x00`, `0x60=0xF4`, `0x63=0xF6`, `0x80=0x55`, `0x83=0x14`,
-  `0xC0=0x30`, `0xA0=0x98`, `0xB0=0x31`
+- per-voice register writes: modulator `0x20=0x01`, `0x40=0x18`,
+  `0x60=0xF4`, `0x80=0x55`; carrier `0x20=0x01`, `0x40=0x00`,
+  `0x60=0xF6`, `0x80=0x14`; channel `0xC0=0x30`, `0xA0=0x98`,
+  `0xB0=0x31`
+- active channels: `0-2`
 
 Commands:
 
@@ -132,23 +137,23 @@ Native-rate (`49716 Hz`) result:
 
 | Implementation | Benchmark | CPU | Iterations | Sample Rate | ns/op | MB/s |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
-| `ImpSynth` | `BenchmarkGenerateStereoS16_2048Frames-12` | AMD Ryzen 5 5500U | 2048 | 49716 | 114646 | 71.45 |
-| `Nuked-OPL3` | `BenchmarkNukedOPL3GenerateStream_2048Frames` | AMD Ryzen 5 5500U | 2048 | 49716 | 885166 | 9.25 |
+| `ImpSynth` | `BenchmarkGenerateStereoS16_2048Frames-12` | AMD Ryzen 5 5500U | 2048 | 49716 | 294363 | 27.83 |
+| `Nuked-OPL3` | `BenchmarkNukedOPL3GenerateStream_2048Frames` | AMD Ryzen 5 5500U | 2048 | 49716 | 914420 | 8.96 |
 
 Resampled (`44100 Hz`) result:
 
 | Implementation | Benchmark | CPU | Iterations | Sample Rate | ns/op | MB/s |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
-| `ImpSynth` | `BenchmarkGenerateStereoS16_2048Frames_44100Hz-12` | AMD Ryzen 5 5500U | 2048 | 44100 | 136499 | 60.01 |
-| `Nuked-OPL3` | `BenchmarkNukedOPL3GenerateStream_2048Frames` | AMD Ryzen 5 5500U | 2048 | 44100 | 999243 | 8.20 |
+| `ImpSynth` | `BenchmarkGenerateStereoS16_2048Frames_44100Hz-12` | AMD Ryzen 5 5500U | 2048 | 44100 | 338525 | 24.20 |
+| `Nuked-OPL3` | `BenchmarkNukedOPL3GenerateStream_2048Frames` | AMD Ryzen 5 5500U | 2048 | 44100 | 1035295 | 7.91 |
 
 At a glance:
 
 - At `49716 Hz`, `ImpSynth` completed the same `2048`-frame render in about
-  `7.72x` less time than `Nuked-OPL3` (`114646 ns/op` vs `885166 ns/op`).
+  `3.11x` less time than `Nuked-OPL3` (`294363 ns/op` vs `914420 ns/op`).
 - At `44100 Hz`, where both implementations exercise output resampling,
-  `ImpSynth` completed the same render in about `7.32x` less time than
-  `Nuked-OPL3` (`136499 ns/op` vs `999243 ns/op`).
+  `ImpSynth` completed the same render in about `3.06x` less time than
+  `Nuked-OPL3` (`338525 ns/op` vs `1035295 ns/op`).
 
 Why `ImpSynth` is faster:
 
