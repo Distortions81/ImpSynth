@@ -2,6 +2,8 @@
 
 ![ImpSynth logo](ImpSynth.png)
 
+[![Watch the demo on YouTube](https://img.youtube.com/vi/1Zk8GzTGVV0/hqdefault.jpg)](https://www.youtube.com/watch?v=1Zk8GzTGVV0)
+
 `impsynth` is a small Go OPL3-style FM synth library.
 
 It focuses on the practical DMX/Doom-style register subset:
