@@ -30,6 +30,7 @@ const (
 	oplWaveTableMask  = oplWaveTableSize - 1
 	oplPhaseFracBits  = 9
 	oplEnvelopeSilent = 0x1ff
+	oplEnvelopeMax    = 0x3ff
 	oplAttenTableSize = 2048
 	oplPanGainShift   = 15
 	oplPanGainUnit    = 1 << oplPanGainShift
@@ -95,6 +96,7 @@ var (
 	oplWaveTable  [8][oplWaveTableSize]float64
 	oplAttenTable [oplAttenTableSize]float64
 	oplEnvShift   [64][14][4][2]uint8
+	oplWave0LUT   [oplWaveTableSize][oplEnvelopeMax + 1]int16
 )
 
 type oplEnvStage uint8
@@ -102,12 +104,24 @@ type oplRenderMode uint8
 
 const (
 	oplRenderModeGeneric oplRenderMode = iota
-	oplRenderModeWave0FM
-	oplRenderModeWave0FMFeedback
-	oplRenderModeWave0Additive
-	oplRenderModeWave0FMStatic
-	oplRenderModeWave0FMFeedbackStatic
-	oplRenderModeWave0AdditiveStatic
+	oplRenderModeWave0FMStereo
+	oplRenderModeWave0FMLeft
+	oplRenderModeWave0FMRight
+	oplRenderModeWave0FMFeedbackStereo
+	oplRenderModeWave0FMFeedbackLeft
+	oplRenderModeWave0FMFeedbackRight
+	oplRenderModeWave0AdditiveStereo
+	oplRenderModeWave0AdditiveLeft
+	oplRenderModeWave0AdditiveRight
+	oplRenderModeWave0FMStaticStereo
+	oplRenderModeWave0FMStaticLeft
+	oplRenderModeWave0FMStaticRight
+	oplRenderModeWave0FMFeedbackStaticStereo
+	oplRenderModeWave0FMFeedbackStaticLeft
+	oplRenderModeWave0FMFeedbackStaticRight
+	oplRenderModeWave0AdditiveStaticStereo
+	oplRenderModeWave0AdditiveStaticLeft
+	oplRenderModeWave0AdditiveStaticRight
 )
 
 type impSynthOperatorState struct {
@@ -182,6 +196,7 @@ func init() {
 	buildOPLWaveTables()
 	buildOPLAttenuationTable()
 	buildOPLEnvelopeShiftTable()
+	buildOPLWave0LUT()
 }
 
 // New creates a synth at the provided sample rate.
@@ -425,18 +440,42 @@ func (o *Synth) renderChannel(ch int) (int32, int32) {
 		return 0, 0
 	}
 	switch c.render {
-	case oplRenderModeWave0FMStatic:
-		return o.renderChannelWave0FMStatic(c)
-	case oplRenderModeWave0FMFeedbackStatic:
-		return o.renderChannelWave0FeedbackStatic(c)
-	case oplRenderModeWave0AdditiveStatic:
-		return o.renderChannelWave0AdditiveStatic(c)
-	case oplRenderModeWave0FM:
-		return o.renderChannelCommonWave0(c)
-	case oplRenderModeWave0FMFeedback:
-		return o.renderChannelWave0Feedback(c)
-	case oplRenderModeWave0Additive:
-		return o.renderChannelWave0Additive(c)
+	case oplRenderModeWave0FMStaticStereo:
+		return o.renderChannelWave0FMStaticStereo(c)
+	case oplRenderModeWave0FMStaticLeft:
+		return o.renderChannelWave0FMStaticLeft(c)
+	case oplRenderModeWave0FMStaticRight:
+		return o.renderChannelWave0FMStaticRight(c)
+	case oplRenderModeWave0FMFeedbackStaticStereo:
+		return o.renderChannelWave0FeedbackStaticStereo(c)
+	case oplRenderModeWave0FMFeedbackStaticLeft:
+		return o.renderChannelWave0FeedbackStaticLeft(c)
+	case oplRenderModeWave0FMFeedbackStaticRight:
+		return o.renderChannelWave0FeedbackStaticRight(c)
+	case oplRenderModeWave0AdditiveStaticStereo:
+		return o.renderChannelWave0AdditiveStaticStereo(c)
+	case oplRenderModeWave0AdditiveStaticLeft:
+		return o.renderChannelWave0AdditiveStaticLeft(c)
+	case oplRenderModeWave0AdditiveStaticRight:
+		return o.renderChannelWave0AdditiveStaticRight(c)
+	case oplRenderModeWave0FMStereo:
+		return o.renderChannelWave0FMStereo(c)
+	case oplRenderModeWave0FMLeft:
+		return o.renderChannelWave0FMLeft(c)
+	case oplRenderModeWave0FMRight:
+		return o.renderChannelWave0FMRight(c)
+	case oplRenderModeWave0FMFeedbackStereo:
+		return o.renderChannelWave0FeedbackStereo(c)
+	case oplRenderModeWave0FMFeedbackLeft:
+		return o.renderChannelWave0FeedbackLeft(c)
+	case oplRenderModeWave0FMFeedbackRight:
+		return o.renderChannelWave0FeedbackRight(c)
+	case oplRenderModeWave0AdditiveStereo:
+		return o.renderChannelWave0AdditiveStereo(c)
+	case oplRenderModeWave0AdditiveLeft:
+		return o.renderChannelWave0AdditiveLeft(c)
+	case oplRenderModeWave0AdditiveRight:
+		return o.renderChannelWave0AdditiveRight(c)
 	}
 
 	mod := &c.ops[0]
@@ -467,7 +506,7 @@ func (o *Synth) renderChannel(ch int) (int32, int32) {
 	return applyPanGain(out, c.panL), applyPanGain(out, c.panR)
 }
 
-func (o *Synth) renderChannelCommonWave0(c *impSynthChannelState) (int32, int32) {
+func (o *Synth) renderChannelCommonWave0Raw(c *impSynthChannelState) int32 {
 	mod := &c.ops[0]
 	car := &c.ops[1]
 
@@ -481,10 +520,10 @@ func (o *Synth) renderChannelCommonWave0(c *impSynthChannelState) (int32, int32)
 	carPhase := o.advanceOperatorPhase(c, car)
 	carRaw := sampleOperatorWave0(car, carPhase, modRaw)
 
-	return applyPanGain(carRaw, c.panL), applyPanGain(carRaw, c.panR)
+	return int32(carRaw)
 }
 
-func (o *Synth) renderChannelWave0FMStatic(c *impSynthChannelState) (int32, int32) {
+func (o *Synth) renderChannelWave0FMStaticRaw(c *impSynthChannelState) int32 {
 	mod := &c.ops[0]
 	car := &c.ops[1]
 
@@ -496,10 +535,10 @@ func (o *Synth) renderChannelWave0FMStatic(c *impSynthChannelState) (int32, int3
 	carPhase := advanceOperatorPhaseNoVib(c, car)
 	carRaw := sampleOperatorWave0(car, carPhase, modRaw)
 
-	return applyPanGain(carRaw, c.panL), applyPanGain(carRaw, c.panR)
+	return int32(carRaw)
 }
 
-func (o *Synth) renderChannelWave0Feedback(c *impSynthChannelState) (int32, int32) {
+func (o *Synth) renderChannelWave0FeedbackRaw(c *impSynthChannelState) int32 {
 	mod := &c.ops[0]
 	car := &c.ops[1]
 
@@ -514,10 +553,10 @@ func (o *Synth) renderChannelWave0Feedback(c *impSynthChannelState) (int32, int3
 	carPhase := o.advanceOperatorPhase(c, car)
 	carRaw := sampleOperatorWave0(car, carPhase, modRaw)
 
-	return applyPanGain(carRaw, c.panL), applyPanGain(carRaw, c.panR)
+	return int32(carRaw)
 }
 
-func (o *Synth) renderChannelWave0FeedbackStatic(c *impSynthChannelState) (int32, int32) {
+func (o *Synth) renderChannelWave0FeedbackStaticRaw(c *impSynthChannelState) int32 {
 	mod := &c.ops[0]
 	car := &c.ops[1]
 
@@ -532,10 +571,10 @@ func (o *Synth) renderChannelWave0FeedbackStatic(c *impSynthChannelState) (int32
 	carPhase := advanceOperatorPhaseNoVib(c, car)
 	carRaw := sampleOperatorWave0(car, carPhase, modRaw)
 
-	return applyPanGain(carRaw, c.panL), applyPanGain(carRaw, c.panR)
+	return int32(carRaw)
 }
 
-func (o *Synth) renderChannelWave0Additive(c *impSynthChannelState) (int32, int32) {
+func (o *Synth) renderChannelWave0AdditiveRaw(c *impSynthChannelState) int32 {
 	mod := &c.ops[0]
 	car := &c.ops[1]
 
@@ -549,11 +588,10 @@ func (o *Synth) renderChannelWave0Additive(c *impSynthChannelState) (int32, int3
 	carPhase := o.advanceOperatorPhase(c, car)
 	carRaw := sampleOperatorWave0(car, carPhase, 0)
 
-	out := carRaw + modRaw
-	return applyPanGain(out, c.panL), applyPanGain(out, c.panR)
+	return int32(carRaw + modRaw)
 }
 
-func (o *Synth) renderChannelWave0AdditiveStatic(c *impSynthChannelState) (int32, int32) {
+func (o *Synth) renderChannelWave0AdditiveStaticRaw(c *impSynthChannelState) int32 {
 	mod := &c.ops[0]
 	car := &c.ops[1]
 
@@ -565,8 +603,83 @@ func (o *Synth) renderChannelWave0AdditiveStatic(c *impSynthChannelState) (int32
 	carPhase := advanceOperatorPhaseNoVib(c, car)
 	carRaw := sampleOperatorWave0(car, carPhase, 0)
 
-	out := carRaw + modRaw
-	return applyPanGain(out, c.panL), applyPanGain(out, c.panR)
+	return int32(carRaw + modRaw)
+}
+
+func stereoSample(v int32) (int32, int32) { return v, v }
+func leftSample(v int32) (int32, int32)   { return v, 0 }
+func rightSample(v int32) (int32, int32)  { return 0, v }
+
+func (o *Synth) renderChannelWave0FMStereo(c *impSynthChannelState) (int32, int32) {
+	return stereoSample(o.renderChannelCommonWave0Raw(c))
+}
+
+func (o *Synth) renderChannelWave0FMLeft(c *impSynthChannelState) (int32, int32) {
+	return leftSample(o.renderChannelCommonWave0Raw(c))
+}
+
+func (o *Synth) renderChannelWave0FMRight(c *impSynthChannelState) (int32, int32) {
+	return rightSample(o.renderChannelCommonWave0Raw(c))
+}
+
+func (o *Synth) renderChannelWave0FeedbackStereo(c *impSynthChannelState) (int32, int32) {
+	return stereoSample(o.renderChannelWave0FeedbackRaw(c))
+}
+
+func (o *Synth) renderChannelWave0FeedbackLeft(c *impSynthChannelState) (int32, int32) {
+	return leftSample(o.renderChannelWave0FeedbackRaw(c))
+}
+
+func (o *Synth) renderChannelWave0FeedbackRight(c *impSynthChannelState) (int32, int32) {
+	return rightSample(o.renderChannelWave0FeedbackRaw(c))
+}
+
+func (o *Synth) renderChannelWave0AdditiveStereo(c *impSynthChannelState) (int32, int32) {
+	return stereoSample(o.renderChannelWave0AdditiveRaw(c))
+}
+
+func (o *Synth) renderChannelWave0AdditiveLeft(c *impSynthChannelState) (int32, int32) {
+	return leftSample(o.renderChannelWave0AdditiveRaw(c))
+}
+
+func (o *Synth) renderChannelWave0AdditiveRight(c *impSynthChannelState) (int32, int32) {
+	return rightSample(o.renderChannelWave0AdditiveRaw(c))
+}
+
+func (o *Synth) renderChannelWave0FMStaticStereo(c *impSynthChannelState) (int32, int32) {
+	return stereoSample(o.renderChannelWave0FMStaticRaw(c))
+}
+
+func (o *Synth) renderChannelWave0FMStaticLeft(c *impSynthChannelState) (int32, int32) {
+	return leftSample(o.renderChannelWave0FMStaticRaw(c))
+}
+
+func (o *Synth) renderChannelWave0FMStaticRight(c *impSynthChannelState) (int32, int32) {
+	return rightSample(o.renderChannelWave0FMStaticRaw(c))
+}
+
+func (o *Synth) renderChannelWave0FeedbackStaticStereo(c *impSynthChannelState) (int32, int32) {
+	return stereoSample(o.renderChannelWave0FeedbackStaticRaw(c))
+}
+
+func (o *Synth) renderChannelWave0FeedbackStaticLeft(c *impSynthChannelState) (int32, int32) {
+	return leftSample(o.renderChannelWave0FeedbackStaticRaw(c))
+}
+
+func (o *Synth) renderChannelWave0FeedbackStaticRight(c *impSynthChannelState) (int32, int32) {
+	return rightSample(o.renderChannelWave0FeedbackStaticRaw(c))
+}
+
+func (o *Synth) renderChannelWave0AdditiveStaticStereo(c *impSynthChannelState) (int32, int32) {
+	return stereoSample(o.renderChannelWave0AdditiveStaticRaw(c))
+}
+
+func (o *Synth) renderChannelWave0AdditiveStaticLeft(c *impSynthChannelState) (int32, int32) {
+	return leftSample(o.renderChannelWave0AdditiveStaticRaw(c))
+}
+
+func (o *Synth) renderChannelWave0AdditiveStaticRight(c *impSynthChannelState) (int32, int32) {
+	return rightSample(o.renderChannelWave0AdditiveStaticRaw(c))
 }
 
 func (o *Synth) sampleOperator(op *impSynthOperatorState, phase int, phaseMod int) int {
@@ -577,7 +690,7 @@ func (o *Synth) sampleOperator(op *impSynthOperatorState, phase int, phaseMod in
 }
 
 func sampleOperatorWave0(op *impSynthOperatorState, phase int, phaseMod int) int {
-	return oplWaveOutput0(uint16(phase+phaseMod), op.egOut)
+	return int(oplWave0LUT[uint16(phase+phaseMod)&oplWaveTableMask][op.egOut])
 }
 
 func (o *Synth) advanceEnvelope(c *impSynthChannelState, op *impSynthOperatorState) {
@@ -667,9 +780,6 @@ func (o *Synth) advanceEnvelope(c *impSynthChannelState, op *impSynthOperatorSta
 }
 
 func (o *Synth) advanceEnvelopeNoTrem(c *impSynthChannelState, op *impSynthOperatorState) {
-	if c == nil || op == nil {
-		return
-	}
 	baseAtten := int(op.egRout) + int(op.regTL<<2) + int(op.egKSL>>oplKSLShift[op.regKSL])
 	op.egOut = uint16(clampAtten(baseAtten))
 
@@ -908,30 +1018,75 @@ func (o *Synth) updateRenderMode(ch int) {
 	if o.stereoExt || c.ops[0].regWave != 0 || c.ops[1].regWave != 0 {
 		return
 	}
+	panStereo, panLeft, panRight := classifyRenderPan(c.panL, c.panR)
+	if !panStereo && !panLeft && !panRight {
+		return
+	}
 	static := !c.ops[0].regVib && !c.ops[1].regVib && !c.ops[0].regTrem && !c.ops[1].regTrem
 	if c.additive {
 		if c.feedback == 0 {
 			if static {
-				c.render = oplRenderModeWave0AdditiveStatic
+				c.render = selectRenderModePan(panStereo, panLeft,
+					oplRenderModeWave0AdditiveStaticStereo,
+					oplRenderModeWave0AdditiveStaticLeft,
+					oplRenderModeWave0AdditiveStaticRight)
 			} else {
-				c.render = oplRenderModeWave0Additive
+				c.render = selectRenderModePan(panStereo, panLeft,
+					oplRenderModeWave0AdditiveStereo,
+					oplRenderModeWave0AdditiveLeft,
+					oplRenderModeWave0AdditiveRight)
 			}
 		}
 		return
 	}
 	if c.feedback == 0 {
 		if static {
-			c.render = oplRenderModeWave0FMStatic
+			c.render = selectRenderModePan(panStereo, panLeft,
+				oplRenderModeWave0FMStaticStereo,
+				oplRenderModeWave0FMStaticLeft,
+				oplRenderModeWave0FMStaticRight)
 		} else {
-			c.render = oplRenderModeWave0FM
+			c.render = selectRenderModePan(panStereo, panLeft,
+				oplRenderModeWave0FMStereo,
+				oplRenderModeWave0FMLeft,
+				oplRenderModeWave0FMRight)
 		}
 		return
 	}
 	if static {
-		c.render = oplRenderModeWave0FMFeedbackStatic
+		c.render = selectRenderModePan(panStereo, panLeft,
+			oplRenderModeWave0FMFeedbackStaticStereo,
+			oplRenderModeWave0FMFeedbackStaticLeft,
+			oplRenderModeWave0FMFeedbackStaticRight)
 	} else {
-		c.render = oplRenderModeWave0FMFeedback
+		c.render = selectRenderModePan(panStereo, panLeft,
+			oplRenderModeWave0FMFeedbackStereo,
+			oplRenderModeWave0FMFeedbackLeft,
+			oplRenderModeWave0FMFeedbackRight)
 	}
+}
+
+func classifyRenderPan(panL int32, panR int32) (stereo bool, left bool, right bool) {
+	switch {
+	case panL == oplPanGainUnit && panR == oplPanGainUnit:
+		return true, false, false
+	case panL == oplPanGainUnit && panR == 0:
+		return false, true, false
+	case panL == 0 && panR == oplPanGainUnit:
+		return false, false, true
+	default:
+		return false, false, false
+	}
+}
+
+func selectRenderModePan(stereo bool, left bool, stereoMode oplRenderMode, leftMode oplRenderMode, rightMode oplRenderMode) oplRenderMode {
+	if stereo {
+		return stereoMode
+	}
+	if left {
+		return leftMode
+	}
+	return rightMode
 }
 
 func (o *Synth) updateOperatorKSL(ch int, op int) {
@@ -1131,6 +1286,14 @@ func buildOPLEnvelopeShiftTable() {
 					oplEnvShift[rate][egAdd][timerLo][egState] = uint8(shift)
 				}
 			}
+		}
+	}
+}
+
+func buildOPLWave0LUT() {
+	for phase := 0; phase < oplWaveTableSize; phase++ {
+		for envelope := 0; envelope <= oplEnvelopeMax; envelope++ {
+			oplWave0LUT[phase][envelope] = int16(oplWaveOutput0(uint16(phase), uint16(envelope)))
 		}
 	}
 }
