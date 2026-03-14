@@ -129,6 +129,7 @@ type impSynthOperatorState struct {
 	phaseReset bool
 	egRout     uint16
 	egOut      uint16
+	egBase     uint16
 	stage      oplEnvStage
 	regVib     bool
 	regTrem    bool
@@ -780,7 +781,7 @@ func (o *Synth) advanceEnvelope(c *impSynthChannelState, op *impSynthOperatorSta
 }
 
 func (o *Synth) advanceEnvelopeNoTrem(c *impSynthChannelState, op *impSynthOperatorState) {
-	baseAtten := int(op.egRout) + int(op.regTL<<2) + int(op.egKSL>>oplKSLShift[op.regKSL])
+	baseAtten := int(op.egRout) + int(op.egBase)
 	op.egOut = uint16(clampAtten(baseAtten))
 
 	reset := c.keyOn && op.stage == oplEnvRelease
@@ -887,9 +888,6 @@ func (o *Synth) advanceOperatorPhase(c *impSynthChannelState, op *impSynthOperat
 }
 
 func advanceOperatorPhaseNoVib(c *impSynthChannelState, op *impSynthOperatorState) int {
-	if c == nil || op == nil {
-		return 0
-	}
 	phase := int(uint16(op.pgPhase >> oplPhaseFracBits))
 	if op.phaseReset {
 		op.pgPhase = 0
@@ -1103,7 +1101,9 @@ func (o *Synth) updateOperatorKSL(ch int, op int) {
 	if ksl < 0 {
 		ksl = 0
 	}
-	o.ch[ch].ops[op].egKSL = uint8(ksl)
+	s := &o.ch[ch].ops[op]
+	s.egKSL = uint8(ksl)
+	s.egBase = uint16(int(s.regTL<<2) + int(s.egKSL>>oplKSLShift[s.regKSL]))
 }
 
 func (o *Synth) advanceChipState() {
