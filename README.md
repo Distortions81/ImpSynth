@@ -142,29 +142,29 @@ Result on March 13, 2026:
 
 | Voices | Sample Rate | `ImpSynth` ns/op | `Nuked-OPL3` ns/op | `ImpSynth` Advantage |
 | ---: | ---: | ---: | ---: | ---: |
-| 3 | 49716 | 221033 | 906457 | `4.10x` faster |
-| 3 | 44100 | 240637 | 1017196 | `4.23x` faster |
+| 3 | 49716 | 91009 | 447963 | `4.92x` faster |
+| 3 | 44100 | 106834 | 513206 | `4.80x` faster |
 
 8 voices (`channels 0-7`, checked-in benches):
 
 | Voices | Sample Rate | `ImpSynth` ns/op | `Nuked-OPL3` ns/op | `ImpSynth` Advantage |
 | ---: | ---: | ---: | ---: | ---: |
-| 8 | 49716 | 421926 | 946991 | `2.24x` faster |
-| 8 | 44100 | 485404 | 1033235 | `2.13x` faster |
+| 8 | 49716 | 207969 | 462027 | `2.22x` faster |
+| 8 | 44100 | 225860 | 526920 | `2.33x` faster |
 
 18 voices (`channels 0-17`, checked-in benches):
 
 | Voices | Sample Rate | `ImpSynth` ns/op | `Nuked-OPL3` ns/op | `ImpSynth` Advantage |
 | ---: | ---: | ---: | ---: | ---: |
-| 18 | 49716 | 848318 | 933041 | `1.10x` faster |
-| 18 | 44100 | 1007607 | 1039951 | `1.03x` faster |
+| 18 | 49716 | 443380 | 449019 | `1.01x` faster |
+| 18 | 44100 | 502365 | 515642 | `1.03x` faster |
 
 At a glance:
 
-- At the checked-in 3-voice benchmark, `ImpSynth` is now about `4.1x-4.2x`
+- At the checked-in 3-voice benchmark, `ImpSynth` is now about `4.8x-4.9x`
   faster than `Nuked-OPL3`.
 - At `8` active voices, `ImpSynth` remains comfortably ahead at about
-  `2.1x-2.2x`.
+  `2.2x-2.3x`.
 - At `18` active voices, the gap is narrow, but `ImpSynth` is still ahead on
   this machine in both native-rate and `44100 Hz` runs.
 - The comparison harness now vendors the pinned `Nuked-OPL3` sources under
@@ -194,7 +194,7 @@ Legend:
 
 Hardware / software used for the measurement:
 
-- CPU: AMD Ryzen 5 5500U with Radeon Graphics
+- CPU: AMD Ryzen 9 7950X 16-Core Processor
 - OS: Linux 6.8.0-101-generic (Ubuntu)
 - Go: go1.25.0 linux/amd64
 
