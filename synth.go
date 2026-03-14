@@ -31,6 +31,8 @@ const (
 	oplPhaseFracBits  = 9
 	oplEnvelopeSilent = 0x1ff
 	oplAttenTableSize = 2048
+	oplPanGainShift   = 15
+	oplPanGainUnit    = 1 << oplPanGainShift
 
 	oplChannelMixGain                      = 0.125
 	oplOperatorOutputScale                 = 4096.0
@@ -92,9 +94,21 @@ var (
 	}
 	oplWaveTable  [8][oplWaveTableSize]float64
 	oplAttenTable [oplAttenTableSize]float64
+	oplEnvShift   [64][14][4][2]uint8
 )
 
 type oplEnvStage uint8
+type oplRenderMode uint8
+
+const (
+	oplRenderModeGeneric oplRenderMode = iota
+	oplRenderModeWave0FM
+	oplRenderModeWave0FMFeedback
+	oplRenderModeWave0Additive
+	oplRenderModeWave0FMStatic
+	oplRenderModeWave0FMFeedbackStatic
+	oplRenderModeWave0AdditiveStatic
+)
 
 type impSynthOperatorState struct {
 	pgPhase    uint32
@@ -123,9 +137,10 @@ type impSynthChannelState struct {
 	fnum     uint16
 	block    uint8
 	ksv      uint8
+	render   oplRenderMode
 	additive bool
-	panL     float64
-	panR     float64
+	panL     int32
+	panR     int32
 	feedback uint8
 	fbPrev   [2]int
 	ops      [opl3OperatorCount]impSynthOperatorState
@@ -139,10 +154,10 @@ type Synth struct {
 	resampleStep     uint64
 	resamplePhase    uint64
 	resamplePrimed   bool
-	resamplePrevL    float64
-	resamplePrevR    float64
-	resampleNextL    float64
-	resampleNextR    float64
+	resamplePrevL    int32
+	resamplePrevR    int32
+	resampleNextL    int32
+	resampleNextR    int32
 	regs             [0x200]uint8
 	ch               [opl3ChannelCount]impSynthChannelState
 	waveformSelectOn bool
@@ -166,6 +181,7 @@ type Synth struct {
 func init() {
 	buildOPLWaveTables()
 	buildOPLAttenuationTable()
+	buildOPLEnvelopeShiftTable()
 }
 
 // New creates a synth at the provided sample rate.
@@ -209,8 +225,8 @@ func (o *Synth) Reset() {
 	o.resampleNextL = 0
 	o.resampleNextR = 0
 	for i := range o.ch {
-		o.ch[i].panL = 1
-		o.ch[i].panR = 1
+		o.ch[i].panL = oplPanGainUnit
+		o.ch[i].panR = oplPanGainUnit
 		for op := range o.ch[i].ops {
 			o.ch[i].ops[op] = impSynthOperatorState{
 				egRout: oplEnvelopeSilent,
@@ -239,10 +255,8 @@ func (o *Synth) WriteReg(addr uint16, value uint8) {
 		return
 	case 0x105:
 		o.stereoExt = (value & 0x02) != 0
-		if !o.stereoExt {
-			for ch := range o.ch {
-				o.refreshChannelControl(ch)
-			}
+		for ch := range o.ch {
+			o.refreshChannelControl(ch)
 		}
 		return
 	case 0x08:
@@ -324,15 +338,13 @@ func (o *Synth) GenerateStereoS16(frames int) []int16 {
 	out := o.stereoBuf
 	for i := 0; i < frames; i++ {
 		l, r := o.nextStereoSample()
-		l = clampSample(l)
-		r = clampSample(r)
-		out[i*2] = int16(l * 32767)
-		out[i*2+1] = int16(r * 32767)
+		out[i*2] = clampPCM16(l)
+		out[i*2+1] = clampPCM16(r)
 	}
 	return out
 }
 
-func (o *Synth) nextStereoSample() (float64, float64) {
+func (o *Synth) nextStereoSample() (int32, int32) {
 	if o == nil {
 		return 0, 0
 	}
@@ -340,9 +352,8 @@ func (o *Synth) nextStereoSample() (float64, float64) {
 		return o.renderChipSample()
 	}
 	o.primeResampler()
-	alpha := float64(o.resamplePhase) / float64(uint64(1)<<32)
-	l := o.resamplePrevL + (o.resampleNextL-o.resamplePrevL)*alpha
-	r := o.resamplePrevR + (o.resampleNextR-o.resamplePrevR)*alpha
+	l := lerpPCM16(o.resamplePrevL, o.resampleNextL, o.resamplePhase)
+	r := lerpPCM16(o.resamplePrevR, o.resampleNextR, o.resamplePhase)
 
 	o.resamplePhase += o.resampleStep
 	for o.resamplePhase >= (uint64(1) << 32) {
@@ -363,8 +374,8 @@ func (o *Synth) primeResampler() {
 	o.resamplePrimed = true
 }
 
-func (o *Synth) renderChipSample() (float64, float64) {
-	var l, r float64
+func (o *Synth) renderChipSample() (int32, int32) {
+	var l, r int32
 	for active := o.activeMask; active != 0; active &= active - 1 {
 		ch := bits.TrailingZeros32(active)
 		sl, sr := o.renderChannel(ch)
@@ -404,7 +415,7 @@ func (o *Synth) GenerateMonoU8(frames int) []byte {
 	return out
 }
 
-func (o *Synth) renderChannel(ch int) (float64, float64) {
+func (o *Synth) renderChannel(ch int) (int32, int32) {
 	if ch < 0 || ch >= len(o.ch) {
 		return 0, 0
 	}
@@ -412,6 +423,20 @@ func (o *Synth) renderChannel(ch int) (float64, float64) {
 	if !c.keyOn && c.ops[0].egRout >= oplEnvelopeSilent && c.ops[1].egRout >= oplEnvelopeSilent {
 		o.activeMask &^= 1 << uint(ch)
 		return 0, 0
+	}
+	switch c.render {
+	case oplRenderModeWave0FMStatic:
+		return o.renderChannelWave0FMStatic(c)
+	case oplRenderModeWave0FMFeedbackStatic:
+		return o.renderChannelWave0FeedbackStatic(c)
+	case oplRenderModeWave0AdditiveStatic:
+		return o.renderChannelWave0AdditiveStatic(c)
+	case oplRenderModeWave0FM:
+		return o.renderChannelCommonWave0(c)
+	case oplRenderModeWave0FMFeedback:
+		return o.renderChannelWave0Feedback(c)
+	case oplRenderModeWave0Additive:
+		return o.renderChannelWave0Additive(c)
 	}
 
 	mod := &c.ops[0]
@@ -423,7 +448,7 @@ func (o *Synth) renderChannel(ch int) (float64, float64) {
 	if c.feedback != 0 {
 		modFB = oplFeedbackPhaseOffset(c.fbPrev[0], c.fbPrev[1], c.feedback)
 	}
-	modRaw, modSample := o.sampleOperator(mod, modPhase, modFB)
+	modRaw := o.sampleOperator(mod, modPhase, modFB)
 	c.fbPrev[1] = c.fbPrev[0]
 	c.fbPrev[0] = modRaw
 
@@ -433,21 +458,126 @@ func (o *Synth) renderChannel(ch int) (float64, float64) {
 	if !c.additive {
 		carMod = modRaw
 	}
-	_, carSample := o.sampleOperator(car, carPhase, carMod)
+	carRaw := o.sampleOperator(car, carPhase, carMod)
 
-	out := carSample
+	out := carRaw
 	if c.additive {
-		out += modSample
+		out += modRaw
 	}
-	return out * c.panL * oplChannelMixGain, out * c.panR * oplChannelMixGain
+	return applyPanGain(out, c.panL), applyPanGain(out, c.panR)
 }
 
-func (o *Synth) sampleOperator(op *impSynthOperatorState, phase int, phaseMod int) (int, float64) {
+func (o *Synth) renderChannelCommonWave0(c *impSynthChannelState) (int32, int32) {
+	mod := &c.ops[0]
+	car := &c.ops[1]
+
+	o.advanceEnvelope(c, mod)
+	modPhase := o.advanceOperatorPhase(c, mod)
+	modRaw := sampleOperatorWave0(mod, modPhase, 0)
+	c.fbPrev[1] = c.fbPrev[0]
+	c.fbPrev[0] = modRaw
+
+	o.advanceEnvelope(c, car)
+	carPhase := o.advanceOperatorPhase(c, car)
+	carRaw := sampleOperatorWave0(car, carPhase, modRaw)
+
+	return applyPanGain(carRaw, c.panL), applyPanGain(carRaw, c.panR)
+}
+
+func (o *Synth) renderChannelWave0FMStatic(c *impSynthChannelState) (int32, int32) {
+	mod := &c.ops[0]
+	car := &c.ops[1]
+
+	o.advanceEnvelopeNoTrem(c, mod)
+	modPhase := advanceOperatorPhaseNoVib(c, mod)
+	modRaw := sampleOperatorWave0(mod, modPhase, 0)
+
+	o.advanceEnvelopeNoTrem(c, car)
+	carPhase := advanceOperatorPhaseNoVib(c, car)
+	carRaw := sampleOperatorWave0(car, carPhase, modRaw)
+
+	return applyPanGain(carRaw, c.panL), applyPanGain(carRaw, c.panR)
+}
+
+func (o *Synth) renderChannelWave0Feedback(c *impSynthChannelState) (int32, int32) {
+	mod := &c.ops[0]
+	car := &c.ops[1]
+
+	o.advanceEnvelope(c, mod)
+	modPhase := o.advanceOperatorPhase(c, mod)
+	modFB := oplFeedbackPhaseOffset(c.fbPrev[0], c.fbPrev[1], c.feedback)
+	modRaw := sampleOperatorWave0(mod, modPhase, modFB)
+	c.fbPrev[1] = c.fbPrev[0]
+	c.fbPrev[0] = modRaw
+
+	o.advanceEnvelope(c, car)
+	carPhase := o.advanceOperatorPhase(c, car)
+	carRaw := sampleOperatorWave0(car, carPhase, modRaw)
+
+	return applyPanGain(carRaw, c.panL), applyPanGain(carRaw, c.panR)
+}
+
+func (o *Synth) renderChannelWave0FeedbackStatic(c *impSynthChannelState) (int32, int32) {
+	mod := &c.ops[0]
+	car := &c.ops[1]
+
+	o.advanceEnvelopeNoTrem(c, mod)
+	modPhase := advanceOperatorPhaseNoVib(c, mod)
+	modFB := oplFeedbackPhaseOffset(c.fbPrev[0], c.fbPrev[1], c.feedback)
+	modRaw := sampleOperatorWave0(mod, modPhase, modFB)
+	c.fbPrev[1] = c.fbPrev[0]
+	c.fbPrev[0] = modRaw
+
+	o.advanceEnvelopeNoTrem(c, car)
+	carPhase := advanceOperatorPhaseNoVib(c, car)
+	carRaw := sampleOperatorWave0(car, carPhase, modRaw)
+
+	return applyPanGain(carRaw, c.panL), applyPanGain(carRaw, c.panR)
+}
+
+func (o *Synth) renderChannelWave0Additive(c *impSynthChannelState) (int32, int32) {
+	mod := &c.ops[0]
+	car := &c.ops[1]
+
+	o.advanceEnvelope(c, mod)
+	modPhase := o.advanceOperatorPhase(c, mod)
+	modRaw := sampleOperatorWave0(mod, modPhase, 0)
+	c.fbPrev[1] = c.fbPrev[0]
+	c.fbPrev[0] = modRaw
+
+	o.advanceEnvelope(c, car)
+	carPhase := o.advanceOperatorPhase(c, car)
+	carRaw := sampleOperatorWave0(car, carPhase, 0)
+
+	out := carRaw + modRaw
+	return applyPanGain(out, c.panL), applyPanGain(out, c.panR)
+}
+
+func (o *Synth) renderChannelWave0AdditiveStatic(c *impSynthChannelState) (int32, int32) {
+	mod := &c.ops[0]
+	car := &c.ops[1]
+
+	o.advanceEnvelopeNoTrem(c, mod)
+	modPhase := advanceOperatorPhaseNoVib(c, mod)
+	modRaw := sampleOperatorWave0(mod, modPhase, 0)
+
+	o.advanceEnvelopeNoTrem(c, car)
+	carPhase := advanceOperatorPhaseNoVib(c, car)
+	carRaw := sampleOperatorWave0(car, carPhase, 0)
+
+	out := carRaw + modRaw
+	return applyPanGain(out, c.panL), applyPanGain(out, c.panR)
+}
+
+func (o *Synth) sampleOperator(op *impSynthOperatorState, phase int, phaseMod int) int {
 	if op == nil {
-		return 0, 0
+		return 0
 	}
-	raw := oplWaveOutput(op.regWave&0x07, uint16(phase+phaseMod), op.egOut)
-	return raw, float64(raw) / oplOperatorOutputScale
+	return oplWaveOutput(op.regWave&0x07, uint16(phase+phaseMod), op.egOut)
+}
+
+func sampleOperatorWave0(op *impSynthOperatorState, phase int, phaseMod int) int {
+	return oplWaveOutput0(uint16(phase+phaseMod), op.egOut)
 }
 
 func (o *Synth) advanceEnvelope(c *impSynthChannelState, op *impSynthOperatorState) {
@@ -491,30 +621,9 @@ func (o *Synth) advanceEnvelope(c *impSynthChannelState, op *impSynthOperatorSta
 		rate = 0x3f
 	}
 	rateHi := rate >> 2
-	rateLo := rate & 0x03
-	egShift := rateHi + int(o.egAdd)
 	shift := 0
 	if nonZero {
-		if rateHi < 12 {
-			if o.egState != 0 {
-				switch egShift {
-				case 12:
-					shift = 1
-				case 13:
-					shift = (rateLo >> 1) & 0x01
-				case 14:
-					shift = rateLo & 0x01
-				}
-			}
-		} else {
-			shift = (rateHi & 0x03) + int(oplEGIncStep[rateLo][o.egTimerLo])
-			if (shift & 0x04) != 0 {
-				shift = 0x03
-			}
-			if shift == 0 {
-				shift = int(o.egState)
-			}
-		}
+		shift = int(oplEnvShift[rate][o.egAdd][o.egTimerLo][o.egState])
 	}
 	egRout := int(op.egRout)
 	if reset && rateHi == 0x0f {
@@ -534,6 +643,85 @@ func (o *Synth) advanceEnvelope(c *impSynthChannelState, op *impSynthOperatorSta
 			// Match the chip's 9-bit attack wraparound instead of masking the
 			// complement first. Masking first leaves a fully silent operator
 			// stuck at 0x1ff for medium attack rates.
+			egInc = int(^op.egRout) >> uint(4-shift)
+		}
+	case oplEnvDecay:
+		if int(op.egRout>>4) == int(op.regSL) {
+			op.stage = oplEnvSustain
+		} else if !egOff && !reset && shift > 0 {
+			egInc = 1 << (shift - 1)
+		}
+	case oplEnvSustain, oplEnvRelease:
+		if !egOff && !reset && shift > 0 {
+			egInc = 1 << (shift - 1)
+		}
+	}
+
+	op.egRout = uint16((egRout + egInc) & oplEnvelopeSilent)
+	if reset {
+		op.stage = oplEnvAttack
+	}
+	if !c.keyOn {
+		op.stage = oplEnvRelease
+	}
+}
+
+func (o *Synth) advanceEnvelopeNoTrem(c *impSynthChannelState, op *impSynthOperatorState) {
+	if c == nil || op == nil {
+		return
+	}
+	baseAtten := int(op.egRout) + int(op.regTL<<2) + int(op.egKSL>>oplKSLShift[op.regKSL])
+	op.egOut = uint16(clampAtten(baseAtten))
+
+	reset := c.keyOn && op.stage == oplEnvRelease
+	regRate := uint8(0)
+	if reset {
+		regRate = op.regAR
+	} else {
+		switch op.stage {
+		case oplEnvAttack:
+			regRate = op.regAR
+		case oplEnvDecay:
+			regRate = op.regDR
+		case oplEnvSustain:
+			if !op.regType {
+				regRate = op.regRR
+			}
+		case oplEnvRelease:
+			regRate = op.regRR
+		}
+	}
+	op.phaseReset = reset
+
+	ks := int(c.ksv)
+	if !op.regKSR {
+		ks >>= 2
+	}
+	nonZero := regRate != 0
+	rate := ks + int(regRate<<2)
+	if rate > 0x3f {
+		rate = 0x3f
+	}
+	rateHi := rate >> 2
+	shift := 0
+	if nonZero {
+		shift = int(oplEnvShift[rate][o.egAdd][o.egTimerLo][o.egState])
+	}
+	egRout := int(op.egRout)
+	if reset && rateHi == 0x0f {
+		egRout = 0
+	}
+	egOff := (op.egRout & 0x1f8) == 0x1f8
+	if op.stage != oplEnvAttack && !reset && egOff {
+		egRout = oplEnvelopeSilent
+	}
+
+	egInc := 0
+	switch op.stage {
+	case oplEnvAttack:
+		if op.egRout == 0 {
+			op.stage = oplEnvDecay
+		} else if c.keyOn && shift > 0 && rateHi != 0x0f {
 			egInc = int(^op.egRout) >> uint(4-shift)
 		}
 	case oplEnvDecay:
@@ -583,8 +771,22 @@ func (o *Synth) advanceOperatorPhase(c *impSynthChannelState, op *impSynthOperat
 		}
 		fnum += rangeVal
 	}
-
 	baseFreq := (fnum << c.block) >> 1
+	op.pgPhase += uint32((baseFreq * int(oplFrequencyMultiples[op.regMult])) >> 1)
+	return phase & oplWaveTableMask
+}
+
+func advanceOperatorPhaseNoVib(c *impSynthChannelState, op *impSynthOperatorState) int {
+	if c == nil || op == nil {
+		return 0
+	}
+	phase := int(uint16(op.pgPhase >> oplPhaseFracBits))
+	if op.phaseReset {
+		op.pgPhase = 0
+		phase = 0
+		op.phaseReset = false
+	}
+	baseFreq := (int(c.fnum) << c.block) >> 1
 	op.pgPhase += uint32((baseFreq * int(oplFrequencyMultiples[op.regMult])) >> 1)
 	return phase & oplWaveTableMask
 }
@@ -633,18 +835,20 @@ func (o *Synth) refreshChannelControl(ch int) {
 	left := (c0 & 0x10) != 0
 	right := (c0 & 0x20) != 0
 	if o.stereoExt {
+		o.updateRenderMode(ch)
 		return
 	}
 	switch {
 	case left && right:
-		o.ch[ch].panL, o.ch[ch].panR = 1, 1
+		o.ch[ch].panL, o.ch[ch].panR = oplPanGainUnit, oplPanGainUnit
 	case left:
-		o.ch[ch].panL, o.ch[ch].panR = 0, 1
+		o.ch[ch].panL, o.ch[ch].panR = 0, oplPanGainUnit
 	case right:
-		o.ch[ch].panL, o.ch[ch].panR = 1, 0
+		o.ch[ch].panL, o.ch[ch].panR = oplPanGainUnit, 0
 	default:
-		o.ch[ch].panL, o.ch[ch].panR = 1, 1
+		o.ch[ch].panL, o.ch[ch].panR = oplPanGainUnit, oplPanGainUnit
 	}
+	o.updateRenderMode(ch)
 }
 
 func (o *Synth) refreshChannelStereoPan(ch int) {
@@ -653,7 +857,8 @@ func (o *Synth) refreshChannelStereoPan(ch int) {
 		return
 	}
 	pan := o.regs[base+0xD0+ci]
-	o.ch[ch].panL, o.ch[ch].panR = oplStereoPanGains(pan)
+	o.ch[ch].panL, o.ch[ch].panR = oplStereoPanGainsFixed(pan)
+	o.updateRenderMode(ch)
 }
 
 func (o *Synth) refreshOperator(ch int, op int) {
@@ -691,6 +896,42 @@ func (o *Synth) refreshOperator(ch int, op int) {
 		s.regWave &= 0x03
 	}
 	o.updateOperatorKSL(ch, op)
+	o.updateRenderMode(ch)
+}
+
+func (o *Synth) updateRenderMode(ch int) {
+	if ch < 0 || ch >= len(o.ch) {
+		return
+	}
+	c := &o.ch[ch]
+	c.render = oplRenderModeGeneric
+	if o.stereoExt || c.ops[0].regWave != 0 || c.ops[1].regWave != 0 {
+		return
+	}
+	static := !c.ops[0].regVib && !c.ops[1].regVib && !c.ops[0].regTrem && !c.ops[1].regTrem
+	if c.additive {
+		if c.feedback == 0 {
+			if static {
+				c.render = oplRenderModeWave0AdditiveStatic
+			} else {
+				c.render = oplRenderModeWave0Additive
+			}
+		}
+		return
+	}
+	if c.feedback == 0 {
+		if static {
+			c.render = oplRenderModeWave0FMStatic
+		} else {
+			c.render = oplRenderModeWave0FM
+		}
+		return
+	}
+	if static {
+		c.render = oplRenderModeWave0FMFeedbackStatic
+	} else {
+		c.render = oplRenderModeWave0FMFeedback
+	}
 }
 
 func (o *Synth) updateOperatorKSL(ch int, op int) {
@@ -836,9 +1077,61 @@ func oplStereoPanGains(pan uint8) (float64, float64) {
 	return left, right
 }
 
+func oplStereoPanGainsFixed(pan uint8) (int32, int32) {
+	left, right := oplStereoPanGains(pan)
+	l := int32(math.Round(left * float64(oplPanGainUnit)))
+	r := int32(math.Round(right * float64(oplPanGainUnit)))
+	if l < 0 {
+		l = 0
+	} else if l > oplPanGainUnit {
+		l = oplPanGainUnit
+	}
+	if r < 0 {
+		r = 0
+	} else if r > oplPanGainUnit {
+		r = oplPanGainUnit
+	}
+	return l, r
+}
+
 func buildOPLAttenuationTable() {
 	for i := 0; i < len(oplAttenTable); i++ {
 		oplAttenTable[i] = math.Exp2(-float64(i) / 32.0)
+	}
+}
+
+func buildOPLEnvelopeShiftTable() {
+	for rate := 0; rate < 64; rate++ {
+		rateHi := rate >> 2
+		rateLo := rate & 0x03
+		for egAdd := 0; egAdd < 14; egAdd++ {
+			for timerLo := 0; timerLo < 4; timerLo++ {
+				for egState := 0; egState < 2; egState++ {
+					shift := 0
+					if rateHi < 12 {
+						if egState != 0 {
+							switch rateHi + egAdd {
+							case 12:
+								shift = 1
+							case 13:
+								shift = (rateLo >> 1) & 0x01
+							case 14:
+								shift = rateLo & 0x01
+							}
+						}
+					} else {
+						shift = (rateHi & 0x03) + int(oplEGIncStep[rateLo][timerLo])
+						if (shift & 0x04) != 0 {
+							shift = 0x03
+						}
+						if shift == 0 {
+							shift = egState
+						}
+					}
+					oplEnvShift[rate][egAdd][timerLo][egState] = uint8(shift)
+				}
+			}
+		}
 	}
 }
 
@@ -870,6 +1163,27 @@ func clampSample(v float64) float64 {
 		return 1
 	}
 	return v
+}
+
+func clampPCM16(v int32) int16 {
+	if v < -32768 {
+		return -32768
+	}
+	if v > 32767 {
+		return 32767
+	}
+	return int16(v)
+}
+
+func lerpPCM16(prev int32, next int32, phase uint64) int32 {
+	return prev + int32((int64(next-prev)*int64(phase))>>32)
+}
+
+func applyPanGain(sample int, gain int32) int32 {
+	// Old path scale: sample / 4096 * gain * 0.125 * 32767.
+	// Since 4096*8 == 32768, this reduces to a near-unity fixed-point scale.
+	scaled := int64(sample) * int64(gain) * 32767
+	return int32(scaled >> (15 + 15))
 }
 
 func phaseModFromSample(op *impSynthOperatorState, sample float64) int {
