@@ -131,27 +131,39 @@ go test -bench=BenchmarkGenerateStereoS16_2048Frames_44100Hz -benchmem -benchtim
 
 Result on March 13, 2026:
 
-Native-rate (`49716 Hz`) result:
+3 voices (`channels 0-2`, checked-in benches):
 
-| Implementation | Benchmark | CPU | Iterations | Sample Rate | ns/op | MB/s |
-| --- | --- | --- | ---: | ---: | ---: | ---: |
-| `ImpSynth` | `BenchmarkGenerateStereoS16_2048Frames-12` | AMD Ryzen 5 5500U | 2048 | 49716 | 294363 | 27.83 |
-| `Nuked-OPL3` | `BenchmarkNukedOPL3GenerateStream_2048Frames` | AMD Ryzen 5 5500U | 2048 | 49716 | 914420 | 8.96 |
+| Voices | Sample Rate | `ImpSynth` ns/op | `Nuked-OPL3` ns/op | `ImpSynth` Advantage |
+| ---: | ---: | ---: | ---: | ---: |
+| 3 | 49716 | 221033 | 906457 | `4.10x` faster |
+| 3 | 44100 | 240637 | 1017196 | `4.23x` faster |
 
-Resampled (`44100 Hz`) result:
+8 voices (`channels 0-7`, temporary matching local harnesses):
 
-| Implementation | Benchmark | CPU | Iterations | Sample Rate | ns/op | MB/s |
-| --- | --- | --- | ---: | ---: | ---: | ---: |
-| `ImpSynth` | `BenchmarkGenerateStereoS16_2048Frames_44100Hz-12` | AMD Ryzen 5 5500U | 2048 | 44100 | 338525 | 24.20 |
-| `Nuked-OPL3` | `BenchmarkNukedOPL3GenerateStream_2048Frames` | AMD Ryzen 5 5500U | 2048 | 44100 | 1035295 | 7.91 |
+| Voices | Sample Rate | `ImpSynth` ns/op | `Nuked-OPL3` ns/op | `ImpSynth` Advantage |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 49716 | 421926 | 946991 | `2.24x` faster |
+| 8 | 44100 | 485404 | 1033235 | `2.13x` faster |
+
+18 voices (`channels 0-17`, temporary matching local harnesses):
+
+| Voices | Sample Rate | `ImpSynth` ns/op | `Nuked-OPL3` ns/op | `ImpSynth` Advantage |
+| ---: | ---: | ---: | ---: | ---: |
+| 18 | 49716 | 848318 | 933041 | `1.10x` faster |
+| 18 | 44100 | 1007607 | 1039951 | `1.03x` faster |
 
 At a glance:
 
-- At `49716 Hz`, `ImpSynth` completed the same `2048`-frame render in about
-  `3.11x` less time than `Nuked-OPL3` (`294363 ns/op` vs `914420 ns/op`).
-- At `44100 Hz`, where both implementations exercise output resampling,
-  `ImpSynth` completed the same render in about `3.06x` less time than
-  `Nuked-OPL3` (`338525 ns/op` vs `1035295 ns/op`).
+- At the checked-in 3-voice benchmark, `ImpSynth` is now about `4.1x-4.2x`
+  faster than `Nuked-OPL3`.
+- At `8` active voices, `ImpSynth` remains comfortably ahead at about
+  `2.1x-2.2x`.
+- At `18` active voices, the gap is narrow, but `ImpSynth` is still ahead on
+  this machine in both native-rate and `44100 Hz` runs.
+- The checked-in Go max-voice benchmark currently measures a bit better for
+  `ImpSynth` (`830982 ns/op` at `49716 Hz`, `972864 ns/op` at `44100 Hz`), but
+  the `18`-voice table above is the fairest apples-to-apples comparison because
+  both implementations were measured with matching temporary local harnesses.
 
 Why `ImpSynth` is faster:
 
@@ -169,12 +181,10 @@ Legend:
 
 | Field | Meaning |
 | --- | --- |
-| `Implementation` | The synth backend being measured. |
-| `Benchmark` | The benchmark identifier emitted by the tool used for that implementation. Go benchmarks include a `-N` suffix for the active `GOMAXPROCS` value. |
-| `CPU` | Processor model reported by the Go benchmark runner. |
-| `Iterations` | Fixed render operations used for this comparison. Both implementations were run for the same `2048` calls. |
+| `Voices` | Active channels used by the benchmark patch. |
+| `Sample Rate` | Output sample rate used for the run. |
 | `ns/op` | Average nanoseconds per benchmark operation. Here, one operation is one `GenerateStereoS16(2048)` call. |
-| `MB/s` | Effective throughput based on stereo 16-bit PCM bytes produced per operation. |
+| `ImpSynth Advantage` | `Nuked-OPL3 ns/op / ImpSynth ns/op` for that row. |
 
 Hardware / software used for the measurement:
 
