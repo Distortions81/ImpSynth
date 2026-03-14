@@ -32,6 +32,26 @@ type benchmarkPatchFile struct {
 	Regs map[string]int `json:"regs"`
 }
 
+type synthReferenceCorpusCase struct {
+	name string
+	regs []uint16
+}
+
+var synthReferenceCorpusCases = []synthReferenceCorpusCase{
+	{
+		name: "melodic_fm",
+		regs: []uint16{0x20, 0x21, 0x23, 0x01, 0x40, 0x08, 0x43, 0x00, 0x60, 0xF2, 0x63, 0xF2, 0x80, 0x24, 0x83, 0x24, 0xC0, 0x30, 0xA0, 0x98, 0xB0, 0x31},
+	},
+	{
+		name: "bright_feedback",
+		regs: []uint16{0x20, 0x21, 0x23, 0x21, 0x40, 0x04, 0x43, 0x00, 0x60, 0xF4, 0x63, 0xF4, 0x80, 0x22, 0x83, 0x22, 0xC0, 0x3C, 0xA0, 0xC0, 0xB0, 0x35},
+	},
+	{
+		name: "trem_vib",
+		regs: []uint16{0xBD, 0xC0, 0x20, 0xC1, 0x23, 0xC1, 0x40, 0x18, 0x43, 0x00, 0x60, 0xF3, 0x63, 0xF3, 0x80, 0x34, 0x83, 0x34, 0xC0, 0x30, 0xA0, 0x88, 0xB0, 0x33},
+	},
+}
+
 func writeBenchmarkVoice(opl *Synth, ch int) {
 	base := uint16(0)
 	localCh := ch
@@ -63,6 +83,15 @@ func benchmarkSynth(sampleRate int, channels []int) *Synth {
 	opl.WriteReg(0x01, 0x20)
 	for _, ch := range channels {
 		writeBenchmarkVoice(opl, ch)
+	}
+	return opl
+}
+
+func benchmarkReferenceCorpusSynth(sampleRate int, regs []uint16) *Synth {
+	opl := New(sampleRate)
+	opl.WriteReg(0x01, 0x20)
+	for i := 0; i+1 < len(regs); i += 2 {
+		opl.WriteReg(regs[i], uint8(regs[i+1]))
 	}
 	return opl
 }
@@ -406,5 +435,33 @@ func BenchmarkRenderExampleSongTwinkle44100Hz_FastSilenceFill(b *testing.B) {
 		opl := New(exampleSongSampleRate)
 		configureExampleSongVoice(opl, patch)
 		benchmarkRenderExampleSongFastSilenceFill(opl, events)
+	}
+}
+
+func BenchmarkGenerateStereoS16_2048Frames_ReferenceCorpus(b *testing.B) {
+	for _, tc := range synthReferenceCorpusCases {
+		b.Run(tc.name, func(b *testing.B) {
+			opl := benchmarkReferenceCorpusSynth(49716, tc.regs)
+			b.ReportAllocs()
+			b.SetBytes(2048 * 2 * 2)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = opl.GenerateStereoS16(2048)
+			}
+		})
+	}
+}
+
+func BenchmarkGenerateStereoS16_2048Frames_ReferenceCorpus_44100Hz(b *testing.B) {
+	for _, tc := range synthReferenceCorpusCases {
+		b.Run(tc.name, func(b *testing.B) {
+			opl := benchmarkReferenceCorpusSynth(44100, tc.regs)
+			b.ReportAllocs()
+			b.SetBytes(2048 * 2 * 2)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = opl.GenerateStereoS16(2048)
+			}
+		})
 	}
 }
