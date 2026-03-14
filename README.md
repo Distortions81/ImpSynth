@@ -127,16 +127,16 @@ Result on March 13, 2026:
 Native-rate (`49716 Hz`) result:
 
 | Implementation | Benchmark | CPU | Iterations | Sample Rate | ns/op | MB/s |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `ImpSynth` | `BenchmarkGenerateStereoS16_2048Frames-12` | AMD Ryzen 5 5500U with Radeon Graphics | 2048 | 49716 | 114646 | 71.45
-| `Nuked-OPL3` | `BenchmarkNukedOPL3GenerateStream_2048Frames` | AMD Ryzen 5 5500U with Radeon Graphics | 2048 | 49716 | 885166 | 9.25
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| `ImpSynth` | `BenchmarkGenerateStereoS16_2048Frames-12` | AMD Ryzen 5 5500U with Radeon Graphics | 2048 | 49716 | 114646 | 71.45 |
+| `Nuked-OPL3` | `BenchmarkNukedOPL3GenerateStream_2048Frames` | AMD Ryzen 5 5500U with Radeon Graphics | 2048 | 49716 | 885166 | 9.25 |
 
 Resampled (`44100 Hz`) result:
 
 | Implementation | Benchmark | CPU | Iterations | Sample Rate | ns/op | MB/s |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `ImpSynth` | `BenchmarkGenerateStereoS16_2048Frames_44100Hz-12` | AMD Ryzen 5 5500U with Radeon Graphics | 2048 | 44100 | 136499 | 60.01
-| `Nuked-OPL3` | `BenchmarkNukedOPL3GenerateStream_2048Frames` | AMD Ryzen 5 5500U with Radeon Graphics | 2048 | 44100 | 999243 | 8.20
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| `ImpSynth` | `BenchmarkGenerateStereoS16_2048Frames_44100Hz-12` | AMD Ryzen 5 5500U with Radeon Graphics | 2048 | 44100 | 136499 | 60.01 |
+| `Nuked-OPL3` | `BenchmarkNukedOPL3GenerateStream_2048Frames` | AMD Ryzen 5 5500U with Radeon Graphics | 2048 | 44100 | 999243 | 8.20 |
 
 At a glance:
 
