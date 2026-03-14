@@ -13,6 +13,7 @@ import (
 )
 
 var benchmarkVoiceChannels = []int{0, 1, 2}
+var benchmarkEightVoiceChannels = []int{0, 1, 2, 3, 4, 5, 6, 7}
 var benchmarkMaxVoiceChannels = []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
 
 const (
@@ -361,37 +362,31 @@ func TestGenerateStereoS16ReusesBuffer(t *testing.T) {
 }
 
 func BenchmarkGenerateStereoS16_2048Frames(b *testing.B) {
-	opl := benchmarkSynth(49716, benchmarkVoiceChannels)
-	b.ReportAllocs()
-	b.SetBytes(2048 * 2 * 2)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = opl.GenerateStereoS16(2048)
-	}
+	benchmarkGenerateStereoS16(b, 49716, benchmarkVoiceChannels)
 }
 
 func BenchmarkGenerateStereoS16_2048Frames_44100Hz(b *testing.B) {
-	opl := benchmarkSynth(44100, benchmarkVoiceChannels)
-	b.ReportAllocs()
-	b.SetBytes(2048 * 2 * 2)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = opl.GenerateStereoS16(2048)
-	}
+	benchmarkGenerateStereoS16(b, 44100, benchmarkVoiceChannels)
+}
+
+func BenchmarkGenerateStereoS16_2048Frames_8Voices(b *testing.B) {
+	benchmarkGenerateStereoS16(b, 49716, benchmarkEightVoiceChannels)
+}
+
+func BenchmarkGenerateStereoS16_2048Frames_8Voices_44100Hz(b *testing.B) {
+	benchmarkGenerateStereoS16(b, 44100, benchmarkEightVoiceChannels)
 }
 
 func BenchmarkGenerateStereoS16_2048Frames_MaxVoices(b *testing.B) {
-	opl := benchmarkSynth(49716, benchmarkMaxVoiceChannels)
-	b.ReportAllocs()
-	b.SetBytes(2048 * 2 * 2)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = opl.GenerateStereoS16(2048)
-	}
+	benchmarkGenerateStereoS16(b, 49716, benchmarkMaxVoiceChannels)
 }
 
 func BenchmarkGenerateStereoS16_2048Frames_MaxVoices_44100Hz(b *testing.B) {
-	opl := benchmarkSynth(44100, benchmarkMaxVoiceChannels)
+	benchmarkGenerateStereoS16(b, 44100, benchmarkMaxVoiceChannels)
+}
+
+func benchmarkGenerateStereoS16(b *testing.B, sampleRate int, channels []int) {
+	opl := benchmarkSynth(sampleRate, channels)
 	b.ReportAllocs()
 	b.SetBytes(2048 * 2 * 2)
 	b.ResetTimer()

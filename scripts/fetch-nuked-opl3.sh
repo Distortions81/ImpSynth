@@ -3,7 +3,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-out_dir="$repo_root/.cache/nukedopl3"
+out_dir="$repo_root/third_party/nuked-opl3"
 commit="cfedb09efc03f1d7b5fc1f04dd449d77d8c49d50"
 base_url="https://raw.githubusercontent.com/nukeykt/Nuked-OPL3/$commit"
 

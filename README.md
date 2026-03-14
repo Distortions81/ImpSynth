@@ -124,9 +124,16 @@ Commands:
 ```bash
 go test -bench=BenchmarkGenerateStereoS16_2048Frames -benchmem -benchtime=2048x -run=^$ ./...
 go test -bench=BenchmarkGenerateStereoS16_2048Frames_44100Hz -benchmem -benchtime=2048x -run=^$ ./...
-./scripts/fetch-nuked-opl3.sh
+go test -bench=BenchmarkGenerateStereoS16_2048Frames_8Voices -benchmem -benchtime=2048x -run=^$ ./...
+go test -bench=BenchmarkGenerateStereoS16_2048Frames_8Voices_44100Hz -benchmem -benchtime=2048x -run=^$ ./...
+go test -bench=BenchmarkGenerateStereoS16_2048Frames_MaxVoices -benchmem -benchtime=2048x -run=^$ ./...
+go test -bench=BenchmarkGenerateStereoS16_2048Frames_MaxVoices_44100Hz -benchmem -benchtime=2048x -run=^$ ./...
 ./scripts/benchmark-nuked-opl3.sh 2048
 ./scripts/benchmark-nuked-opl3.sh 2048 44100
+./scripts/benchmark-nuked-opl3.sh 2048 49716 8
+./scripts/benchmark-nuked-opl3.sh 2048 44100 8
+./scripts/benchmark-nuked-opl3.sh 2048 49716 18
+./scripts/benchmark-nuked-opl3.sh 2048 44100 18
 ```
 
 Result on March 13, 2026:
@@ -138,14 +145,14 @@ Result on March 13, 2026:
 | 3 | 49716 | 221033 | 906457 | `4.10x` faster |
 | 3 | 44100 | 240637 | 1017196 | `4.23x` faster |
 
-8 voices (`channels 0-7`, temporary matching local harnesses):
+8 voices (`channels 0-7`, checked-in benches):
 
 | Voices | Sample Rate | `ImpSynth` ns/op | `Nuked-OPL3` ns/op | `ImpSynth` Advantage |
 | ---: | ---: | ---: | ---: | ---: |
 | 8 | 49716 | 421926 | 946991 | `2.24x` faster |
 | 8 | 44100 | 485404 | 1033235 | `2.13x` faster |
 
-18 voices (`channels 0-17`, temporary matching local harnesses):
+18 voices (`channels 0-17`, checked-in benches):
 
 | Voices | Sample Rate | `ImpSynth` ns/op | `Nuked-OPL3` ns/op | `ImpSynth` Advantage |
 | ---: | ---: | ---: | ---: | ---: |
@@ -160,10 +167,9 @@ At a glance:
   `2.1x-2.2x`.
 - At `18` active voices, the gap is narrow, but `ImpSynth` is still ahead on
   this machine in both native-rate and `44100 Hz` runs.
-- The checked-in Go max-voice benchmark currently measures a bit better for
-  `ImpSynth` (`830982 ns/op` at `49716 Hz`, `972864 ns/op` at `44100 Hz`), but
-  the `18`-voice table above is the fairest apples-to-apples comparison because
-  both implementations were measured with matching temporary local harnesses.
+- The comparison harness now vendors the pinned `Nuked-OPL3` sources under
+  `third_party/nuked-opl3`, so these benchmark commands remain runnable even if
+  the upstream fetch path changes later.
 
 Why `ImpSynth` is faster:
 
@@ -191,6 +197,11 @@ Hardware / software used for the measurement:
 - CPU: AMD Ryzen 5 5500U with Radeon Graphics
 - OS: Linux 6.8.0-101-generic (Ubuntu)
 - Go: go1.25.0 linux/amd64
+
+The vendored `Nuked-OPL3` benchmark dependency comes from commit
+`cfedb09efc03f1d7b5fc1f04dd449d77d8c49d50`. Run
+`./scripts/fetch-nuked-opl3.sh` only when you want to refresh those checked-in
+files from the same pinned upstream revision.
 
 ## License
 

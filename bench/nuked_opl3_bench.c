@@ -10,8 +10,8 @@
 #define BYTES_PER_SAMPLE 2
 #define DEFAULT_ITERATIONS 2048ULL
 #define DEFAULT_SAMPLE_RATE 49716U
-
-static const int benchmark_channels[] = {0, 1, 2};
+#define DEFAULT_VOICE_COUNT 3
+#define MAX_VOICE_COUNT 18
 
 static void apply_benchmark_voice(opl3_chip *chip, int ch) {
     static const uint16_t mod_slots[9] = {0, 1, 2, 8, 9, 10, 16, 17, 18};
@@ -42,12 +42,10 @@ static void apply_benchmark_voice(opl3_chip *chip, int ch) {
     OPL3_WriteReg(chip, base + 0xB0 + local_ch, 0x31);
 }
 
-static void apply_benchmark_patch(opl3_chip *chip) {
-    size_t i;
-
+static void apply_benchmark_patch(opl3_chip *chip, int voice_count) {
     OPL3_WriteReg(chip, 0x01, 0x20);
-    for (i = 0; i < sizeof(benchmark_channels) / sizeof(benchmark_channels[0]); i++) {
-        apply_benchmark_voice(chip, benchmark_channels[i]);
+    for (int ch = 0; ch < voice_count; ch++) {
+        apply_benchmark_voice(chip, ch);
     }
 }
 
@@ -87,17 +85,33 @@ static uint32_t parse_sample_rate(const char *value) {
     return (uint32_t)parsed;
 }
 
+static int parse_voice_count(const char *value) {
+    char *end = NULL;
+    long parsed;
+
+    if (value == NULL || *value == '\0') {
+        return DEFAULT_VOICE_COUNT;
+    }
+    parsed = strtol(value, &end, 10);
+    if (end == value || *end != '\0' || parsed < 1 || parsed > MAX_VOICE_COUNT) {
+        fprintf(stderr, "invalid voice count: %s\n", value);
+        exit(1);
+    }
+    return (int)parsed;
+}
+
 int main(int argc, char **argv) {
     static int16_t pcm[FRAMES_PER_OP * CHANNELS];
     opl3_chip chip;
     uint64_t iterations = DEFAULT_ITERATIONS;
     uint32_t sample_rate = DEFAULT_SAMPLE_RATE;
+    int voice_count = DEFAULT_VOICE_COUNT;
     uint64_t elapsed_ns;
     double ns_per_op;
     double mb_per_sec;
 
-    if (argc > 3) {
-        fprintf(stderr, "usage: %s [iterations] [sample_rate]\n", argv[0]);
+    if (argc > 4) {
+        fprintf(stderr, "usage: %s [iterations] [sample_rate] [voices]\n", argv[0]);
         return 1;
     }
     if (argc >= 2) {
@@ -105,10 +119,13 @@ int main(int argc, char **argv) {
     }
     if (argc == 3) {
         sample_rate = parse_sample_rate(argv[2]);
+    } else if (argc >= 4) {
+        sample_rate = parse_sample_rate(argv[2]);
+        voice_count = parse_voice_count(argv[3]);
     }
 
     OPL3_Reset(&chip, sample_rate);
-    apply_benchmark_patch(&chip);
+    apply_benchmark_patch(&chip, voice_count);
 
     for (int i = 0; i < 2000; i++) {
         if (sample_rate == DEFAULT_SAMPLE_RATE) {
@@ -138,6 +155,7 @@ int main(int argc, char **argv) {
     printf("BenchmarkNukedOPL3GenerateStream_2048Frames\n");
     printf("iterations\t%llu\n", (unsigned long long)iterations);
     printf("sample_rate\t%u\n", sample_rate);
+    printf("voices\t%d\n", voice_count);
     printf("ns/op\t%.0f\n", ns_per_op);
     printf("MB/s\t%.2f\n", mb_per_sec);
     return 0;
