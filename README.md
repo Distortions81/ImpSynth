@@ -106,8 +106,6 @@ Patch format:
 
 ## Benchmark
 
-Benchmark coverage is limited to synth PCM generation and excludes WAV file writing.
-
 For the cross-check against `Nuked-OPL3`, both implementations use the same
 benchmark patch data:
 
