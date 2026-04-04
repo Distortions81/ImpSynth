@@ -2,7 +2,7 @@
 
 ![ImpSynth logo](ImpSynth.png)
 
-[![Watch the demo on YouTube](https://img.youtube.com/vi/1Zk8GzTGVV0/hqdefault.jpg)](https://www.youtube.com/watch?v=1Zk8GzTGVV0)
+![OPL Example Playlist](https://www.youtube.com/watch?v=drirxcJcZ50&list=PLMxxYNFZPBOh-2qK8iihIQkbcgwXgBegD)
 
 **Demo Song: DOOM: E1M1: Hangar Song: At Doom's Gate on YouTube**
 
