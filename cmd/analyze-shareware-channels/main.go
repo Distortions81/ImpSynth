@@ -82,6 +82,16 @@ func main() {
 	flag.StringVar(&outPath, "out", filepath.Join("docs", "shareware-channel-findings.md"), "output markdown path")
 	flag.Parse()
 
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
+		fail(err)
+	}
+
+	var wolf corpusMetric
+	var doom corpusMetric
+	writeProgress := func() error {
+		return writeMarkdown(outPath, wolf, doom)
+	}
+
 	wolf, err := analyzeCorpus(
 		"Wolf3D Shareware",
 		filepath.Join("testdata", "wolf3d-shareware-music", "manifest.json"),
@@ -89,27 +99,31 @@ func main() {
 		wolfTickRate,
 		9,
 		func(rate int) *impsynth.Synth { return impsynth.NewOPL2(rate) },
+		func(progress corpusMetric) error {
+			wolf = progress
+			return writeProgress()
+		},
 	)
 	if err != nil {
 		fail(err)
 	}
-	doom, err := analyzeCorpus(
+	doom, err = analyzeCorpus(
 		"DOOM Shareware",
 		filepath.Join("testdata", "doom-shareware-music", "manifest.json"),
 		filepath.Join("testdata", "doom-shareware-music"),
 		doomTickRate,
 		18,
 		func(rate int) *impsynth.Synth { return impsynth.New(rate) },
+		func(progress corpusMetric) error {
+			doom = progress
+			return writeProgress()
+		},
 	)
 	if err != nil {
 		fail(err)
 	}
 
-	doc := renderMarkdown(wolf, doom)
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
-		fail(err)
-	}
-	if err := os.WriteFile(outPath, []byte(doc), 0o644); err != nil {
+	if err := writeMarkdown(outPath, wolf, doom); err != nil {
 		fail(err)
 	}
 	fmt.Println(outPath)
@@ -120,7 +134,7 @@ func fail(err error) {
 	os.Exit(1)
 }
 
-func analyzeCorpus(title, manifestPath, baseDir string, defaultTickRate, channels int, newSynth func(int) *impsynth.Synth) (corpusMetric, error) {
+func analyzeCorpus(title, manifestPath, baseDir string, defaultTickRate, channels int, newSynth func(int) *impsynth.Synth, progress func(corpusMetric) error) (corpusMetric, error) {
 	var m manifest
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
@@ -140,60 +154,26 @@ func analyzeCorpus(title, manifestPath, baseDir string, defaultTickRate, channel
 		TickRate: tickRate,
 		Songs:    make([]songMetric, 0, len(m.Songs)),
 	}
-	limit := runtime.NumCPU()
-	if limit < 1 {
-		limit = 1
-	}
-	swg := sizedwaitgroup.New(limit)
-	results := make([]songMetric, 0, len(m.Songs))
-	var mu sync.Mutex
-	errCh := make(chan error, len(m.Songs))
 	for _, song := range m.Songs {
-		song := song
-		swg.Add()
-		go func() {
-			defer swg.Done()
-			label := strings.TrimSpace(song.Name)
-			if label == "" {
-				label = strings.TrimSpace(song.Lump)
-			}
-			path := filepath.Join(baseDir, song.File)
-			metric, err := analyzeSong(label, path, tickRate, channels, newSynth)
-			if err != nil {
-				errCh <- err
-				return
-			}
-			mu.Lock()
-			results = append(results, metric)
-			mu.Unlock()
-		}()
-	}
-	swg.Wait()
-	close(errCh)
-	for err := range errCh {
+		label := strings.TrimSpace(song.Name)
+		if label == "" {
+			label = strings.TrimSpace(song.Lump)
+		}
+		path := filepath.Join(baseDir, song.File)
+		metric, err := analyzeSong(label, path, tickRate, channels, newSynth)
 		if err != nil {
 			return corpusMetric{}, err
 		}
-	}
-	out.Songs = results
-	sort.Slice(out.Songs, func(i, j int) bool {
-		if out.Songs[i].MinSpec == out.Songs[j].MinSpec {
-			return out.Songs[i].Label < out.Songs[j].Label
-		}
-		return out.Songs[i].MinSpec < out.Songs[j].MinSpec
-	})
-	if len(out.Songs) > 0 {
-		out.WorstSpec = out.Songs[0]
-		out.WorstChannel = out.Songs[0].Channels[0]
-		for _, song := range out.Songs {
-			for _, ch := range song.Channels {
-				if ch.Spec < out.WorstChannel.Spec {
-					out.WorstSpec = song
-					out.WorstChannel = ch
-				}
+		out.Songs = append(out.Songs, metric)
+		finalizeCorpus(&out)
+		if progress != nil {
+			snapshot := cloneCorpus(out)
+			if err := progress(snapshot); err != nil {
+				return corpusMetric{}, err
 			}
 		}
 	}
+	finalizeCorpus(&out)
 	return out, nil
 }
 
@@ -701,4 +681,51 @@ func renderMarkdown(corpora ...corpusMetric) string {
 		}
 	}
 	return b.String()
+}
+
+func writeMarkdown(path string, corpora ...corpusMetric) error {
+	return os.WriteFile(path, []byte(renderMarkdown(corpora...)), 0o644)
+}
+
+func finalizeCorpus(corpus *corpusMetric) {
+	if corpus == nil {
+		return
+	}
+	sort.Slice(corpus.Songs, func(i, j int) bool {
+		if corpus.Songs[i].MinSpec == corpus.Songs[j].MinSpec {
+			return corpus.Songs[i].Label < corpus.Songs[j].Label
+		}
+		return corpus.Songs[i].MinSpec < corpus.Songs[j].MinSpec
+	})
+	if len(corpus.Songs) == 0 {
+		corpus.WorstSpec = songMetric{}
+		corpus.WorstChannel = channelMetric{}
+		return
+	}
+	found := false
+	for _, song := range corpus.Songs {
+		for _, ch := range song.Channels {
+			if !found || ch.Spec < corpus.WorstChannel.Spec {
+				corpus.WorstSpec = song
+				corpus.WorstChannel = ch
+				found = true
+			}
+		}
+	}
+	if !found {
+		corpus.WorstSpec = corpus.Songs[0]
+		corpus.WorstChannel = channelMetric{}
+	}
+}
+
+func cloneCorpus(in corpusMetric) corpusMetric {
+	out := in
+	out.Songs = append([]songMetric(nil), in.Songs...)
+	for i := range out.Songs {
+		out.Songs[i].Channels = append([]channelMetric(nil), in.Songs[i].Channels...)
+	}
+	if len(out.WorstSpec.Channels) > 0 {
+		out.WorstSpec.Channels = append([]channelMetric(nil), out.WorstSpec.Channels...)
+	}
+	return out
 }
