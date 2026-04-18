@@ -668,6 +668,52 @@ func TestNewOPL2RhythmOutputComparableEnergyToNuked(t *testing.T) {
 	}
 }
 
+func TestSharewareMusicFixturesPresent(t *testing.T) {
+	type manifestEntry struct {
+		Song  int    `json:"song"`
+		Name  string `json:"name"`
+		File  string `json:"file"`
+		Count int    `json:"event_count"`
+	}
+	type manifest struct {
+		Source       string          `json:"source"`
+		Format       string          `json:"format"`
+		MissingSongs []int           `json:"missing_songs"`
+		Songs        []manifestEntry `json:"songs"`
+	}
+
+	data, err := os.ReadFile(filepath.Join("testdata", "wolf3d-shareware-music", "manifest.json"))
+	if err != nil {
+		t.Fatalf("read shareware music manifest: %v", err)
+	}
+	var m manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("parse shareware music manifest: %v", err)
+	}
+	if m.Source == "" || len(m.Songs) == 0 {
+		t.Fatal("expected shareware music manifest entries")
+	}
+	if got := len(m.Songs); got != 11 {
+		t.Fatalf("shareware song count=%d want 11", got)
+	}
+	for _, song := range m.Songs {
+		if song.File == "" || song.Count <= 0 {
+			t.Fatalf("invalid manifest entry: %+v", song)
+		}
+		path := filepath.Join("testdata", "wolf3d-shareware-music", song.File)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if info.Size() <= 0 || info.Size()%5 != 0 {
+			t.Fatalf("fixture %s size=%d want positive multiple of 5", path, info.Size())
+		}
+		if int(info.Size()/5) != song.Count {
+			t.Fatalf("fixture %s event_count=%d want %d", path, info.Size()/5, song.Count)
+		}
+	}
+}
+
 func BenchmarkGenerateStereoS16_2048Frames(b *testing.B) {
 	benchmarkGenerateStereoS16(b, 49716, benchmarkVoiceChannels)
 }
