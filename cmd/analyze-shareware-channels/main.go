@@ -194,25 +194,74 @@ func analyzeCorpus(cfg corpusConfig) (corpusMetric, error) {
 		Songs:    make([]songMetric, 0, len(m.Songs)),
 	}
 
+	totalWorkers := runtime.NumCPU()
+	if totalWorkers < 1 {
+		totalWorkers = 1
+	}
+	songWorkers := songParallelism(totalWorkers, len(m.Songs))
+	perSongWorkers := totalWorkers / songWorkers
+	if perSongWorkers < 1 {
+		perSongWorkers = 1
+	}
+	metrics := make([]songMetric, len(m.Songs))
+	errCh := make(chan error, len(m.Songs))
+	swg := sizedwaitgroup.New(songWorkers)
+
 	for songIndex, song := range m.Songs {
-		plan, jobs, cleanup, err := prepareSongPlan(corpusSlug, cfg, tickRate, songIndex, song)
+		songIndex := songIndex
+		song := song
+		swg.Add()
+		go func() {
+			defer swg.Done()
+			plan, jobs, cleanup, err := prepareSongPlan(corpusSlug, cfg, tickRate, songIndex, song)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			results, err := runRenderJobs(jobs, perSongWorkers)
+			cleanup()
+			if err != nil {
+				errCh <- err
+				return
+			}
+			metric, err := compareSong(plan, songIndex, results, perSongWorkers)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			metrics[songIndex] = metric
+		}()
+	}
+	swg.Wait()
+	close(errCh)
+	for err := range errCh {
 		if err != nil {
 			return corpusMetric{}, err
 		}
-		results, err := runRenderJobs(jobs)
-		cleanup()
-		if err != nil {
-			return corpusMetric{}, err
-		}
-		metric, err := compareSong(plan, songIndex, results)
-		if err != nil {
-			return corpusMetric{}, err
-		}
+	}
+	for _, metric := range metrics {
 		out.Songs = append(out.Songs, metric)
 	}
 
 	finalizeCorpus(&out)
 	return out, nil
+}
+
+func songParallelism(totalWorkers, songCount int) int {
+	if songCount < 1 {
+		return 1
+	}
+	if totalWorkers < 8 || songCount == 1 {
+		return 1
+	}
+	n := totalWorkers / 12
+	if n < 2 {
+		n = 2
+	}
+	if n > songCount {
+		n = songCount
+	}
+	return n
 }
 
 func loadManifest(path string) (manifest, error) {
@@ -298,8 +347,7 @@ func prepareSongPlan(corpusSlug string, cfg corpusConfig, tickRate int, songInde
 	}, jobs, cleanup, nil
 }
 
-func runRenderJobs(jobs []renderJob) (map[int]map[int]map[string]string, error) {
-	limit := runtime.NumCPU()
+func runRenderJobs(jobs []renderJob, limit int) (map[int]map[int]map[string]string, error) {
 	if limit < 1 {
 		limit = 1
 	}
@@ -344,7 +392,7 @@ func runRenderJobs(jobs []renderJob) (map[int]map[int]map[string]string, error) 
 	return results, nil
 }
 
-func compareSong(plan songPlan, songIndex int, rendered map[int]map[int]map[string]string) (songMetric, error) {
+func compareSong(plan songPlan, songIndex int, rendered map[int]map[int]map[string]string, limit int) (songMetric, error) {
 	out := songMetric{
 		Label:    plan.label,
 		Path:     plan.path,
@@ -354,7 +402,6 @@ func compareSong(plan songPlan, songIndex int, rendered map[int]map[int]map[stri
 	}
 
 	bySong := rendered[songIndex]
-	limit := runtime.NumCPU()
 	if limit < 1 {
 		limit = 1
 	}
