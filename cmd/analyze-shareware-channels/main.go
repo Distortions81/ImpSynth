@@ -21,8 +21,8 @@ import (
 
 const (
 	sampleRate      = 49716
+	searchFrames    = 16384
 	windowFrames    = 2048
-	chunkFrames     = 8192
 	wolfTickRate    = 700
 	doomTickRate    = 140
 	minWindowEnergy = 64
@@ -72,49 +72,44 @@ type corpusMetric struct {
 	WorstChannel channelMetric
 }
 
-type renderedChannel struct {
-	channel  int
-	renderer string
-	chunks   [][]int16
+type corpusConfig struct {
+	title           string
+	manifestPath    string
+	baseDir         string
+	defaultTickRate int
+	channels        int
+	newSynth        func(int) *impsynth.Synth
 }
 
-type chunkMetric struct {
-	channel    int
-	spec       float64
-	gotEnergy  int64
-	wantEnergy int64
-	maxDelta   int
-	weight     float64
-}
-
-type channelAccumulator struct {
-	specWeighted float64
-	weightTotal  float64
-	gotEnergy    int64
-	wantEnergy   int64
-	maxDelta     int
-}
-
-type chunkKey struct {
-	channel int
-	chunk   int
+type songPlan struct {
+	corpusSlug  string
+	corpusName  string
+	label       string
+	path        string
+	tickRate    int
+	windowStart int
+	frames      int
+	channels    []int
+	seqPaths    map[int]string
 }
 
 type renderJob struct {
-	key       chunkKey
+	songIndex int
+	channel   int
+	renderer  string
 	seqPath   string
 	cachePath string
 	tickRate  int
 	start     int
 	frames    int
-	renderer  string
 	newSynth  func(int) *impsynth.Synth
 }
 
 type renderResult struct {
-	key      chunkKey
-	renderer string
-	pcm      []int16
+	songIndex int
+	channel   int
+	renderer  string
+	pcm       []int16
 }
 
 var (
@@ -139,44 +134,38 @@ func main() {
 		}
 	}
 
-	var wolf corpusMetric
-	var doom corpusMetric
-	writeProgress := func() error {
-		return writeMarkdown(outPath, wolf, doom)
+	configs := []corpusConfig{
+		{
+			title:           "Wolf3D Shareware",
+			manifestPath:    filepath.Join("testdata", "wolf3d-shareware-music", "manifest.json"),
+			baseDir:         filepath.Join("testdata", "wolf3d-shareware-music"),
+			defaultTickRate: wolfTickRate,
+			channels:        9,
+			newSynth:        func(rate int) *impsynth.Synth { return impsynth.NewOPL2(rate) },
+		},
+		{
+			title:           "DOOM Shareware",
+			manifestPath:    filepath.Join("testdata", "doom-shareware-music", "manifest.json"),
+			baseDir:         filepath.Join("testdata", "doom-shareware-music"),
+			defaultTickRate: doomTickRate,
+			channels:        18,
+			newSynth:        func(rate int) *impsynth.Synth { return impsynth.New(rate) },
+		},
 	}
 
-	wolf, err := analyzeCorpus(
-		"Wolf3D Shareware",
-		filepath.Join("testdata", "wolf3d-shareware-music", "manifest.json"),
-		filepath.Join("testdata", "wolf3d-shareware-music"),
-		wolfTickRate,
-		9,
-		func(rate int) *impsynth.Synth { return impsynth.NewOPL2(rate) },
-		func(progress corpusMetric) error {
-			wolf = progress
-			return writeProgress()
-		},
-	)
-	if err != nil {
-		fail(err)
-	}
-	doom, err = analyzeCorpus(
-		"DOOM Shareware",
-		filepath.Join("testdata", "doom-shareware-music", "manifest.json"),
-		filepath.Join("testdata", "doom-shareware-music"),
-		doomTickRate,
-		18,
-		func(rate int) *impsynth.Synth { return impsynth.New(rate) },
-		func(progress corpusMetric) error {
-			doom = progress
-			return writeProgress()
-		},
-	)
-	if err != nil {
-		fail(err)
+	corpora := make([]corpusMetric, 0, len(configs))
+	for _, cfg := range configs {
+		corpus, err := analyzeCorpus(cfg)
+		if err != nil {
+			fail(err)
+		}
+		corpora = append(corpora, corpus)
+		if err := writeMarkdown(outPath, corpora...); err != nil {
+			fail(err)
+		}
 	}
 
-	if err := writeMarkdown(outPath, wolf, doom); err != nil {
+	if err := writeMarkdown(outPath, corpora...); err != nil {
 		fail(err)
 	}
 	fmt.Println(outPath)
@@ -187,228 +176,207 @@ func fail(err error) {
 	os.Exit(1)
 }
 
-func safeSlug(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	var b strings.Builder
-	lastDash := false
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-			lastDash = false
-		default:
-			if !lastDash {
-				b.WriteByte('-')
-				lastDash = true
-			}
-		}
-	}
-	out := strings.Trim(b.String(), "-")
-	if out == "" {
-		return "unnamed"
-	}
-	return out
-}
-
-func analyzeCorpus(title, manifestPath, baseDir string, defaultTickRate, channels int, newSynth func(int) *impsynth.Synth, progress func(corpusMetric) error) (corpusMetric, error) {
-	var m manifest
-	data, err := os.ReadFile(manifestPath)
+func analyzeCorpus(cfg corpusConfig) (corpusMetric, error) {
+	m, err := loadManifest(cfg.manifestPath)
 	if err != nil {
-		return corpusMetric{}, fmt.Errorf("read manifest %s: %w", manifestPath, err)
-	}
-	if err := json.Unmarshal(data, &m); err != nil {
-		return corpusMetric{}, fmt.Errorf("parse manifest %s: %w", manifestPath, err)
+		return corpusMetric{}, err
 	}
 	tickRate := m.TicRate
 	if tickRate <= 0 {
-		tickRate = defaultTickRate
+		tickRate = cfg.defaultTickRate
 	}
+
+	corpusSlug := safeSlug(filepath.Base(cfg.baseDir))
 	out := corpusMetric{
-		Title:    title,
+		Title:    cfg.title,
 		Source:   m.Source,
-		Channels: channels,
+		Channels: cfg.channels,
 		TickRate: tickRate,
 		Songs:    make([]songMetric, 0, len(m.Songs)),
 	}
-	for _, song := range m.Songs {
-		label := strings.TrimSpace(song.Name)
-		if label == "" {
-			label = strings.TrimSpace(song.Lump)
-		}
-		path := filepath.Join(baseDir, song.File)
-		metric, err := analyzeSong(safeSlug(filepath.Base(baseDir)), label, path, tickRate, channels, newSynth)
+
+	plans, jobs, cleanup, err := prepareCorpusPlans(corpusSlug, cfg, tickRate, m.Songs)
+	if err != nil {
+		return corpusMetric{}, err
+	}
+	defer cleanup()
+
+	results, err := runRenderJobs(jobs)
+	if err != nil {
+		return corpusMetric{}, err
+	}
+
+	for i, plan := range plans {
+		metric, err := compareSong(plan, i, results)
 		if err != nil {
 			return corpusMetric{}, err
 		}
 		out.Songs = append(out.Songs, metric)
-		finalizeCorpus(&out)
-		if progress != nil {
-			if err := progress(cloneCorpus(out)); err != nil {
-				return corpusMetric{}, err
-			}
-		}
 	}
+
 	finalizeCorpus(&out)
 	return out, nil
 }
 
-func analyzeSong(corpusSlug, label, path string, tickRate, channels int, newSynth func(int) *impsynth.Synth) (songMetric, error) {
-	windowStart, err := findWindow(path, tickRate, newSynth)
+func loadManifest(path string) (manifest, error) {
+	var m manifest
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return songMetric{}, fmt.Errorf("find window for %s: %w", label, err)
+		return manifest{}, fmt.Errorf("read manifest %s: %w", path, err)
 	}
-	active, err := detectActiveChannels(path, channels)
-	if err != nil {
-		return songMetric{}, fmt.Errorf("detect active channels for %s: %w", label, err)
+	if err := json.Unmarshal(data, &m); err != nil {
+		return manifest{}, fmt.Errorf("parse manifest %s: %w", path, err)
 	}
-	out := songMetric{
-		Label:    label,
-		Path:     path,
-		Skip:     windowStart,
-		Frames:   windowFrames,
-		Channels: make([]channelMetric, 0, len(active)),
-		MinSpec:  1,
-	}
-	tempSeqs := make(map[int]string, len(active))
-	defer func() {
-		for _, p := range tempSeqs {
-			_ = os.Remove(p)
+	return m, nil
+}
+
+func prepareCorpusPlans(corpusSlug string, cfg corpusConfig, tickRate int, songs []manifestSong) ([]songPlan, []renderJob, func(), error) {
+	plans := make([]songPlan, 0, len(songs))
+	jobs := make([]renderJob, 0, len(songs)*8*2)
+	var tempFiles []string
+	cleanup := func() {
+		for _, path := range tempFiles {
+			_ = os.Remove(path)
 		}
-	}()
-	for _, ch := range active {
-		tmp, err := filterSeqForChannel(path, ch)
-		if err != nil {
-			return songMetric{}, fmt.Errorf("filter %s ch%d: %w", label, ch, err)
-		}
-		tempSeqs[ch] = tmp
 	}
 
-	totalChunks := (windowFrames + chunkFrames - 1) / chunkFrames
-	jobs := make([]renderJob, 0, len(active)*totalChunks*2)
-	for _, ch := range active {
-		for chunkIndex := 0; chunkIndex < totalChunks; chunkIndex++ {
-			start := windowStart + chunkIndex*chunkFrames
-			frames := min(chunkFrames, windowFrames-chunkIndex*chunkFrames)
-			key := chunkKey{channel: ch, chunk: chunkIndex}
+	for songIndex, song := range songs {
+		label := strings.TrimSpace(song.Name)
+		if label == "" {
+			label = strings.TrimSpace(song.Lump)
+		}
+		path := filepath.Join(cfg.baseDir, song.File)
+		windowStart, err := findWindow(path, tickRate, cfg.newSynth)
+		if err != nil {
+			cleanup()
+			return nil, nil, nil, fmt.Errorf("find window for %s: %w", label, err)
+		}
+		channels, err := detectActiveChannels(path, cfg.channels)
+		if err != nil {
+			cleanup()
+			return nil, nil, nil, fmt.Errorf("detect active channels for %s: %w", label, err)
+		}
+		seqPaths := make(map[int]string, len(channels))
+		for _, ch := range channels {
+			tmp, err := filterSeqForChannel(path, ch)
+			if err != nil {
+				cleanup()
+				return nil, nil, nil, fmt.Errorf("filter %s ch%d: %w", label, ch, err)
+			}
+			tempFiles = append(tempFiles, tmp)
+			seqPaths[ch] = tmp
 			jobs = append(jobs,
 				renderJob{
-					key:       key,
-					seqPath:   tempSeqs[ch],
-					cachePath: "",
-					tickRate:  tickRate,
-					start:     start,
-					frames:    frames,
+					songIndex: songIndex,
+					channel:   ch,
 					renderer:  "impsynth",
-					newSynth:  newSynth,
+					seqPath:   tmp,
+					tickRate:  tickRate,
+					start:     windowStart,
+					frames:    windowFrames,
+					newSynth:  cfg.newSynth,
 				},
 				renderJob{
-					key:       key,
-					seqPath:   tempSeqs[ch],
-					cachePath: nukedCachePath(corpusSlug, path, tickRate, key, start, frames),
-					tickRate:  tickRate,
-					start:     start,
-					frames:    frames,
+					songIndex: songIndex,
+					channel:   ch,
 					renderer:  "nuked",
+					seqPath:   tmp,
+					cachePath: nukedCachePath(corpusSlug, path, tickRate, ch, windowStart, windowFrames),
+					tickRate:  tickRate,
+					start:     windowStart,
+					frames:    windowFrames,
 				},
 			)
 		}
+		plans = append(plans, songPlan{
+			corpusSlug:  corpusSlug,
+			corpusName:  cfg.title,
+			label:       label,
+			path:        path,
+			tickRate:    tickRate,
+			windowStart: windowStart,
+			frames:      windowFrames,
+			channels:    channels,
+			seqPaths:    seqPaths,
+		})
 	}
 
-	rendered := make(map[chunkKey]map[string][]int16, len(jobs))
-	var renderMu sync.Mutex
-	renderErrCh := make(chan error, len(jobs))
+	return plans, jobs, cleanup, nil
+}
+
+func runRenderJobs(jobs []renderJob) (map[int]map[int]map[string][]int16, error) {
 	limit := runtime.NumCPU()
 	if limit < 1 {
 		limit = 1
 	}
-	renderWG := sizedwaitgroup.New(limit)
+	swg := sizedwaitgroup.New(limit)
+	errCh := make(chan error, len(jobs))
+	results := make(map[int]map[int]map[string][]int16)
+	var mu sync.Mutex
+
 	for _, job := range jobs {
 		job := job
-		renderWG.Add()
+		swg.Add()
 		go func() {
-			defer renderWG.Done()
+			defer swg.Done()
 			pcm, err := runRenderJob(job)
 			if err != nil {
-				renderErrCh <- fmt.Errorf("%s render %s ch%d chunk%d: %w", job.renderer, label, job.key.channel, job.key.chunk, err)
+				errCh <- fmt.Errorf("%s render song=%d ch=%d: %w", job.renderer, job.songIndex, job.channel, err)
 				return
 			}
-			renderMu.Lock()
-			entry := rendered[job.key]
-			if entry == nil {
-				entry = make(map[string][]int16, 2)
-				rendered[job.key] = entry
+			mu.Lock()
+			bySong := results[job.songIndex]
+			if bySong == nil {
+				bySong = make(map[int]map[string][]int16)
+				results[job.songIndex] = bySong
 			}
-			entry[job.renderer] = pcm
-			renderMu.Unlock()
+			byChannel := bySong[job.channel]
+			if byChannel == nil {
+				byChannel = make(map[string][]int16, 2)
+				bySong[job.channel] = byChannel
+			}
+			byChannel[job.renderer] = pcm
+			mu.Unlock()
 		}()
 	}
-	renderWG.Wait()
-	close(renderErrCh)
-	for err := range renderErrCh {
+
+	swg.Wait()
+	close(errCh)
+	for err := range errCh {
 		if err != nil {
-			return songMetric{}, err
+			return nil, err
 		}
+	}
+	return results, nil
+}
+
+func compareSong(plan songPlan, songIndex int, rendered map[int]map[int]map[string][]int16) (songMetric, error) {
+	out := songMetric{
+		Label:    plan.label,
+		Path:     plan.path,
+		Skip:     plan.windowStart,
+		Frames:   plan.frames,
+		Channels: make([]channelMetric, 0, len(plan.channels)),
+		MinSpec:  1,
 	}
 
-	accumulators := make(map[int]*channelAccumulator, len(active))
-	var compareMu sync.Mutex
-	compareErrCh := make(chan error, len(rendered))
-	compareWG := sizedwaitgroup.New(limit)
-	for key, entry := range rendered {
-		gotChunk, okGot := entry["impsynth"]
-		wantChunk, okWant := entry["nuked"]
-		if !okGot || !okWant {
+	bySong := rendered[songIndex]
+	for _, ch := range plan.channels {
+		pair := bySong[ch]
+		if pair == nil {
 			continue
 		}
-		key := key
-		gotPCM := gotChunk
-		wantPCM := wantChunk
-		compareWG.Add()
-		go func() {
-			defer compareWG.Done()
-			gotEnergy := monoAbsEnergy(gotPCM)
-			wantEnergy := monoAbsEnergy(wantPCM)
-			if gotEnergy < minWindowEnergy && wantEnergy < minWindowEnergy {
-				return
-			}
-			spec := spectrumCosineSimilarity(gotPCM, wantPCM, min(512, len(gotPCM)/2))
-			weight := float64(gotEnergy + wantEnergy)
-			if weight <= 0 {
-				weight = 1
-			}
-			delta := maxPCMDelta(gotPCM, wantPCM)
-			compareMu.Lock()
-			acc := accumulators[key.channel]
-			if acc == nil {
-				acc = &channelAccumulator{}
-				accumulators[key.channel] = acc
-			}
-			acc.specWeighted += spec * weight
-			acc.weightTotal += weight
-			acc.gotEnergy += gotEnergy
-			acc.wantEnergy += wantEnergy
-			if delta > acc.maxDelta {
-				acc.maxDelta = delta
-			}
-			compareMu.Unlock()
-		}()
-	}
-	compareWG.Wait()
-	close(compareErrCh)
-	for err := range compareErrCh {
-		if err != nil {
-			return songMetric{}, err
-		}
-	}
-
-	for _, ch := range active {
-		acc := accumulators[ch]
-		if acc == nil || acc.weightTotal == 0 {
+		got := pair["impsynth"]
+		want := pair["nuked"]
+		if len(got) == 0 || len(want) == 0 {
 			continue
 		}
-		gotEnergy := acc.gotEnergy
-		wantEnergy := acc.wantEnergy
-		spec := acc.specWeighted / acc.weightTotal
+		gotEnergy := monoAbsEnergy(got)
+		wantEnergy := monoAbsEnergy(want)
+		if gotEnergy < minWindowEnergy && wantEnergy < minWindowEnergy {
+			continue
+		}
+		spec := spectrumCosineSimilarity(got, want, 512)
 		ratio := 0.0
 		if wantEnergy > 0 {
 			ratio = float64(gotEnergy) / float64(wantEnergy)
@@ -417,11 +385,12 @@ func analyzeSong(corpusSlug, label, path string, tickRate, channels int, newSynt
 			Channel:     ch,
 			Spec:        spec,
 			EnergyRatio: ratio,
-			MaxDelta:    acc.maxDelta,
+			MaxDelta:    maxPCMDelta(got, want),
 			GotEnergy:   gotEnergy,
 			WantEnergy:  wantEnergy,
 		})
 	}
+
 	for _, metric := range out.Channels {
 		out.MeanSpec += metric.Spec
 		if metric.Spec < out.MinSpec {
@@ -447,11 +416,11 @@ func analyzeSong(corpusSlug, label, path string, tickRate, channels int, newSynt
 	} else {
 		out.MinSpec = 1
 	}
+
 	return out, nil
 }
 
 func findWindow(seqPath string, tickRate int, newSynth func(int) *impsynth.Synth) (int, error) {
-	const searchFrames = 16384
 	full, err := renderImpSynthSeq(sampleRate, tickRate, searchFrames, seqPath, newSynth)
 	if err != nil {
 		return 0, err
@@ -500,44 +469,6 @@ func runRenderJob(job renderJob) ([]int16, error) {
 	default:
 		return nil, fmt.Errorf("unknown renderer %q", job.renderer)
 	}
-}
-
-func nukedCachePath(corpusSlug, songPath string, tickRate int, key chunkKey, start, frames int) string {
-	if renderCacheDir == "" {
-		return ""
-	}
-	songSlug := safeSlug(strings.TrimSuffix(filepath.Base(songPath), filepath.Ext(songPath)))
-	name := fmt.Sprintf("sr%d-tr%d-ch%02d-ck%02d-st%d-fr%d.pcm", sampleRate, tickRate, key.channel, key.chunk, start, frames)
-	return filepath.Join(renderCacheDir, "nuked", corpusSlug, songSlug, name)
-}
-
-func readPCMCache(path string, frames int) ([]int16, bool, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	if len(data) != frames*4 {
-		return nil, false, nil
-	}
-	pcm := make([]int16, frames*2)
-	for i := 0; i < len(pcm); i++ {
-		pcm[i] = int16(binary.LittleEndian.Uint16(data[i*2 : i*2+2]))
-	}
-	return pcm, true, nil
-}
-
-func writePCMCache(path string, pcm []int16) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	data := make([]byte, len(pcm)*2)
-	for i, sample := range pcm {
-		binary.LittleEndian.PutUint16(data[i*2:], uint16(sample))
-	}
-	return os.WriteFile(path, data, 0o644)
 }
 
 func renderImpSynthSeq(sampleRate, tickRate, frames int, seqPath string, newSynth func(int) *impsynth.Synth) ([]int16, error) {
@@ -625,6 +556,44 @@ func renderNukedSeq(sampleRate, tickRate, frames int, seqPath string) ([]int16, 
 		pcm[i] = int16(binary.LittleEndian.Uint16(output[i*2 : i*2+2]))
 	}
 	return pcm, nil
+}
+
+func readPCMCache(path string, frames int) ([]int16, bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if len(data) != frames*4 {
+		return nil, false, nil
+	}
+	pcm := make([]int16, frames*2)
+	for i := 0; i < len(pcm); i++ {
+		pcm[i] = int16(binary.LittleEndian.Uint16(data[i*2 : i*2+2]))
+	}
+	return pcm, true, nil
+}
+
+func writePCMCache(path string, pcm []int16) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data := make([]byte, len(pcm)*2)
+	for i, sample := range pcm {
+		binary.LittleEndian.PutUint16(data[i*2:], uint16(sample))
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func nukedCachePath(corpusSlug, songPath string, tickRate, channel, start, frames int) string {
+	if renderCacheDir == "" {
+		return ""
+	}
+	songSlug := safeSlug(strings.TrimSuffix(filepath.Base(songPath), filepath.Ext(songPath)))
+	name := fmt.Sprintf("sr%d-tr%d-ch%02d-st%d-fr%d.pcm", sampleRate, tickRate, channel, start, frames)
+	return filepath.Join(renderCacheDir, "nuked", corpusSlug, songSlug, name)
 }
 
 type seqEvent struct {
@@ -764,13 +733,6 @@ func sliceStereoFrames(pcm []int16, frameOffset int, frameCount int) []int16 {
 	return out
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func maxPCMDelta(a, b []int16) int {
 	if len(a) != len(b) {
 		return int(^uint(0) >> 1)
@@ -866,9 +828,9 @@ func renderMarkdown(corpora ...corpusMetric) string {
 	b.WriteString("# Shareware Channel Comparison\n\n")
 	b.WriteString("This document compares per-channel `ImpSynth` output against `Nuked-OPL3` using the exported Wolf3D and DOOM shareware sequence fixtures.\n\n")
 	b.WriteString("Method:\n")
-	b.WriteString("- Render a short high-energy window from each song.\n")
-	b.WriteString("- Isolate each OPL channel by filtering its channel and operator register writes plus shared chip-global registers.\n")
-	b.WriteString("- Compare `ImpSynth` and `Nuked-OPL3` with spectral cosine similarity, energy ratio, and max sample delta.\n\n")
+	b.WriteString("- Pick one high-energy analysis window per song.\n")
+	b.WriteString("- Render each active OPL voice/channel once for `ImpSynth` and once for `Nuked-OPL3`.\n")
+	b.WriteString("- Compare the stereo PCM for that voice window using spectral cosine similarity, energy ratio, and max sample delta.\n\n")
 	for _, corpus := range corpora {
 		fmt.Fprintf(&b, "## %s\n\n", corpus.Title)
 		fmt.Fprintf(&b, "Source: `%s`\n", corpus.Source)
@@ -958,6 +920,29 @@ func cloneCorpus(in corpusMetric) corpusMetric {
 	}
 	if len(out.WorstSpec.Channels) > 0 {
 		out.WorstSpec.Channels = append([]channelMetric(nil), out.WorstSpec.Channels...)
+	}
+	return out
+}
+
+func safeSlug(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		default:
+			if !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "unnamed"
 	}
 	return out
 }
