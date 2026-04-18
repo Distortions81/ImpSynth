@@ -67,6 +67,29 @@ func main() {
 surface only, dual-mono output, OPL2 waveform selection rules, and rhythm-mode
 support on `0xBD`.
 
+## OPL2 Findings
+
+The repository now includes shareware Wolf3D music fixtures under
+`testdata/wolf3d-shareware-music` plus `Nuked-OPL3` comparison tests for short
+real-song snippets.
+
+Current findings:
+
+- `WONDERIN` and `ENDLEVEL` compare very closely to `Nuked-OPL3` on the tested
+  windows.
+- `GETTHEM` is the main weaker case in the shareware set.
+- That mismatch is not driven by rhythm mode. In the tested `GETTHEM` window,
+  rhythm mode never turns on.
+- The dominant divergence is a melodic channel issue, especially channel `1`.
+- Channel `1` in that song uses a high-feedback sine voice (`0xC1 = 0x0e`),
+  which points to feedback behavior as the main remaining OPL2 fidelity gap.
+
+Practical implication:
+
+- OPL2 playback is already close on several real shareware tracks.
+- The next place to improve is high-feedback melodic behavior rather than drum
+  mode for the current Wolf3D shareware coverage.
+
 ## Example Program
 
 This repo includes a small renderer that turns a simple melody CSV plus an OPL patch file into a `.wav`:

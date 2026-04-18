@@ -160,7 +160,7 @@ type impSynthChannelState struct {
 	panL     int32
 	panR     int32
 	feedback uint8
-	fbPrev   [2]int
+	fbPrev   [2]int16
 	ops      [opl3OperatorCount]impSynthOperatorState
 }
 
@@ -536,20 +536,21 @@ func (o *Synth) renderChannel(ch int) (int32, int32) {
 		modFB = oplFeedbackPhaseOffset(c.fbPrev[0], c.fbPrev[1], c.feedback)
 	}
 	modRaw := o.sampleOperator(mod, modPhase, modFB)
+	modOut := int(feedbackSample(modRaw))
 	c.fbPrev[1] = c.fbPrev[0]
-	c.fbPrev[0] = modRaw
+	c.fbPrev[0] = int16(modOut)
 
 	o.advanceEnvelope(c, car)
 	carPhase := o.advanceOperatorPhase(c, car)
 	carMod := 0
 	if !c.additive {
-		carMod = modRaw
+		carMod = modOut
 	}
 	carRaw := o.sampleOperator(car, carPhase, carMod)
 
 	out := carRaw
 	if c.additive {
-		out += modRaw
+		out += modOut
 	}
 	return applyPanGain(out, c.panL), applyPanGain(out, c.panR)
 }
@@ -597,14 +598,15 @@ func (o *Synth) renderRhythmBassDrum() (int32, int32) {
 	if operatorHasSound(mod) {
 		modRaw = o.sampleOperator(mod, modPhase, modFB)
 	}
+	modOut := int(feedbackSample(modRaw))
 	c.fbPrev[1] = c.fbPrev[0]
-	c.fbPrev[0] = modRaw
+	c.fbPrev[0] = int16(modOut)
 
 	o.advanceEnvelope(c, car)
 	carPhase := o.advanceOperatorPhase(c, car)
 	carMod := 0
 	if !c.additive {
-		carMod = modRaw
+		carMod = modOut
 	}
 	carRaw := 0
 	if operatorHasSound(car) {
@@ -683,12 +685,13 @@ func (o *Synth) renderChannelCommonWave0Raw(c *impSynthChannelState) int32 {
 	o.advanceEnvelope(c, mod)
 	modPhase := o.advanceOperatorPhase(c, mod)
 	modRaw := sampleOperatorWave0(mod, modPhase, 0)
+	modOut := int(feedbackSample(modRaw))
 	c.fbPrev[1] = c.fbPrev[0]
-	c.fbPrev[0] = modRaw
+	c.fbPrev[0] = int16(modOut)
 
 	o.advanceEnvelope(c, car)
 	carPhase := o.advanceOperatorPhase(c, car)
-	carRaw := sampleOperatorWave0(car, carPhase, modRaw)
+	carRaw := sampleOperatorWave0(car, carPhase, modOut)
 
 	return int32(carRaw)
 }
@@ -700,10 +703,11 @@ func (o *Synth) renderChannelWave0FMStaticRaw(c *impSynthChannelState) int32 {
 	o.advanceEnvelopeNoTrem(c, mod)
 	modPhase := advanceOperatorPhaseNoVib(c, mod)
 	modRaw := sampleOperatorWave0(mod, modPhase, 0)
+	modOut := int(feedbackSample(modRaw))
 
 	o.advanceEnvelopeNoTrem(c, car)
 	carPhase := advanceOperatorPhaseNoVib(c, car)
-	carRaw := sampleOperatorWave0(car, carPhase, modRaw)
+	carRaw := sampleOperatorWave0(car, carPhase, modOut)
 
 	return int32(carRaw)
 }
@@ -716,12 +720,13 @@ func (o *Synth) renderChannelWave0FeedbackRaw(c *impSynthChannelState) int32 {
 	modPhase := o.advanceOperatorPhase(c, mod)
 	modFB := oplFeedbackPhaseOffset(c.fbPrev[0], c.fbPrev[1], c.feedback)
 	modRaw := sampleOperatorWave0(mod, modPhase, modFB)
+	modOut := int(feedbackSample(modRaw))
 	c.fbPrev[1] = c.fbPrev[0]
-	c.fbPrev[0] = modRaw
+	c.fbPrev[0] = int16(modOut)
 
 	o.advanceEnvelope(c, car)
 	carPhase := o.advanceOperatorPhase(c, car)
-	carRaw := sampleOperatorWave0(car, carPhase, modRaw)
+	carRaw := sampleOperatorWave0(car, carPhase, modOut)
 
 	return int32(carRaw)
 }
@@ -734,12 +739,13 @@ func (o *Synth) renderChannelWave0FeedbackStaticRaw(c *impSynthChannelState) int
 	modPhase := advanceOperatorPhaseNoVib(c, mod)
 	modFB := oplFeedbackPhaseOffset(c.fbPrev[0], c.fbPrev[1], c.feedback)
 	modRaw := sampleOperatorWave0(mod, modPhase, modFB)
+	modOut := int(feedbackSample(modRaw))
 	c.fbPrev[1] = c.fbPrev[0]
-	c.fbPrev[0] = modRaw
+	c.fbPrev[0] = int16(modOut)
 
 	o.advanceEnvelopeNoTrem(c, car)
 	carPhase := advanceOperatorPhaseNoVib(c, car)
-	carRaw := sampleOperatorWave0(car, carPhase, modRaw)
+	carRaw := sampleOperatorWave0(car, carPhase, modOut)
 
 	return int32(carRaw)
 }
@@ -751,14 +757,15 @@ func (o *Synth) renderChannelWave0AdditiveRaw(c *impSynthChannelState) int32 {
 	o.advanceEnvelope(c, mod)
 	modPhase := o.advanceOperatorPhase(c, mod)
 	modRaw := sampleOperatorWave0(mod, modPhase, 0)
+	modOut := int(feedbackSample(modRaw))
 	c.fbPrev[1] = c.fbPrev[0]
-	c.fbPrev[0] = modRaw
+	c.fbPrev[0] = int16(modOut)
 
 	o.advanceEnvelope(c, car)
 	carPhase := o.advanceOperatorPhase(c, car)
 	carRaw := sampleOperatorWave0(car, carPhase, 0)
 
-	return int32(carRaw + modRaw)
+	return int32(carRaw + modOut)
 }
 
 func (o *Synth) renderChannelWave0AdditiveStaticRaw(c *impSynthChannelState) int32 {
@@ -768,12 +775,13 @@ func (o *Synth) renderChannelWave0AdditiveStaticRaw(c *impSynthChannelState) int
 	o.advanceEnvelopeNoTrem(c, mod)
 	modPhase := advanceOperatorPhaseNoVib(c, mod)
 	modRaw := sampleOperatorWave0(mod, modPhase, 0)
+	modOut := int(feedbackSample(modRaw))
 
 	o.advanceEnvelopeNoTrem(c, car)
 	carPhase := advanceOperatorPhaseNoVib(c, car)
 	carRaw := sampleOperatorWave0(car, carPhase, 0)
 
-	return int32(carRaw + modRaw)
+	return int32(carRaw + modOut)
 }
 
 func stereoSample(v int32) (int32, int32) { return v, v }
@@ -1074,7 +1082,7 @@ func (o *Synth) keyOnChannel(ch int) {
 	if ch < 0 || ch >= len(o.ch) {
 		return
 	}
-	o.ch[ch].fbPrev = [2]int{}
+	o.ch[ch].fbPrev = [2]int16{}
 	for op := range o.ch[ch].ops {
 		o.ch[ch].ops[op].keyMask |= oplKeyMaskNormal
 	}
@@ -1085,7 +1093,7 @@ func (o *Synth) keyOffChannel(ch int) {
 	if ch < 0 || ch >= len(o.ch) {
 		return
 	}
-	o.ch[ch].fbPrev = [2]int{}
+	o.ch[ch].fbPrev = [2]int16{}
 	for op := range o.ch[ch].ops {
 		o.ch[ch].ops[op].keyMask &^= oplKeyMaskNormal
 		o.ch[ch].ops[op].stage = oplEnvRelease
@@ -1114,7 +1122,7 @@ func (o *Synth) updateRhythm(value uint8) {
 	}
 	if !prevMode {
 		for ch := 6; ch <= 8; ch++ {
-			o.ch[ch].fbPrev = [2]int{}
+			o.ch[ch].fbPrev = [2]int16{}
 		}
 	}
 	o.setDrumKey(7, 0, (o.rhythmBits&0x01) != 0)
@@ -1251,6 +1259,9 @@ func (o *Synth) updateRenderMode(ch int) {
 	}
 	c := &o.ch[ch]
 	c.render = oplRenderModeGeneric
+	if o.opl2Mode && c.feedback != 0 {
+		return
+	}
 	if o.stereoExt || c.ops[0].regWave != 0 || c.ops[1].regWave != 0 {
 		return
 	}
@@ -1648,6 +1659,10 @@ func clampPCM16(v int32) int16 {
 	return int16(v)
 }
 
+func feedbackSample(v int) int16 {
+	return clampPCM16(int32(v))
+}
+
 func lerpPCM16(prev int32, next int32, phase uint64) int32 {
 	return prev + int32((int64(next-prev)*int64(phase))>>32)
 }
@@ -1667,13 +1682,14 @@ func phaseModFromSample(op *impSynthOperatorState, sample float64) int {
 	return int(math.Round(sample * scale))
 }
 
-func oplFeedbackPhaseOffset(prev0, prev1 int, feedback uint8) int {
+func oplFeedbackPhaseOffset(prev0, prev1 int16, feedback uint8) int {
 	if feedback == 0 {
 		return 0
 	}
+	sum := int32(prev0) + int32(prev1)
 	shift := 9 - int(feedback)
 	if shift <= 0 {
-		return prev0 + prev1
+		return int(sum)
 	}
-	return (prev0 + prev1) / (1 << shift)
+	return int(sum >> shift)
 }

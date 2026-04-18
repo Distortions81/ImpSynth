@@ -2,6 +2,7 @@ package impsynth
 
 import (
 	"bufio"
+	"encoding/binary"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -23,11 +24,15 @@ var benchmarkMaxVoiceChannels = []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 
 var nukedDumpOnce sync.Once
 var nukedDumpPath string
 var nukedDumpErr error
+var nukedSeqDumpOnce sync.Once
+var nukedSeqDumpPath string
+var nukedSeqDumpErr error
 
 const (
 	exampleSongSampleRate = 44100
 	exampleSongChunkSize  = 1024
 	exampleSongReleaseMS  = 250
+	wolfMusicTickRate     = 700
 )
 
 type benchmarkNoteEvent struct {
@@ -535,6 +540,68 @@ func renderNukedPCM(t *testing.T, sampleRate int, frames int, regs []uint16) []i
 	return pcm
 }
 
+func buildNukedSeqDumpTool(t *testing.T) string {
+	t.Helper()
+	nukedSeqDumpOnce.Do(func() {
+		out := filepath.Join(os.TempDir(), "nuked-opl3-seq-dump-test")
+		cmd := exec.Command(
+			"gcc",
+			"-O2",
+			"-I", "third_party/nuked-opl3",
+			"-o", out,
+			"bench/nuked_opl3_seq_dump.c",
+			"third_party/nuked-opl3/opl3.c",
+			"-lm",
+		)
+		cmd.Dir = "."
+		if output, err := cmd.CombinedOutput(); err != nil {
+			nukedSeqDumpErr = fmt.Errorf("gcc failed: %w: %s", err, strings.TrimSpace(string(output)))
+		} else {
+			nukedSeqDumpPath = out
+		}
+	})
+	if nukedSeqDumpErr != nil {
+		t.Fatalf("build nuked seq dump tool: %v", nukedSeqDumpErr)
+	}
+	return nukedSeqDumpPath
+}
+
+func renderNukedSeqPCM(t *testing.T, sampleRate int, frames int, seqPath string) []int16 {
+	t.Helper()
+	tool := buildNukedSeqDumpTool(t)
+	cmd := exec.Command(tool, strconv.Itoa(sampleRate), strconv.Itoa(wolfMusicTickRate), strconv.Itoa(frames), seqPath)
+	cmd.Dir = "."
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run nuked seq dump tool: %v", err)
+	}
+
+	pcm := make([]int16, 0, frames*2)
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) != 2 {
+			t.Fatalf("unexpected nuked seq output line: %q", scanner.Text())
+		}
+		left, err := strconv.Atoi(fields[0])
+		if err != nil {
+			t.Fatalf("parse left seq sample: %v", err)
+		}
+		right, err := strconv.Atoi(fields[1])
+		if err != nil {
+			t.Fatalf("parse right seq sample: %v", err)
+		}
+		pcm = append(pcm, int16(left), int16(right))
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan nuked seq output: %v", err)
+	}
+	if len(pcm) != frames*2 {
+		t.Fatalf("nuked seq pcm len=%d want=%d", len(pcm), frames*2)
+	}
+	return pcm
+}
+
 func renderImpSynthOPL2(sampleRate int, frames int, regs []uint16) []int16 {
 	opl := NewOPL2(sampleRate)
 	for i := 0; i+1 < len(regs); i += 2 {
@@ -544,6 +611,146 @@ func renderImpSynthOPL2(sampleRate int, frames int, regs []uint16) []int16 {
 	pcm := make([]int16, len(out))
 	copy(pcm, out)
 	return pcm
+}
+
+func renderImpSynthOPL2Seq(t *testing.T, sampleRate int, frames int, seqPath string) []int16 {
+	t.Helper()
+	data, err := os.ReadFile(seqPath)
+	if err != nil {
+		t.Fatalf("read seq fixture: %v", err)
+	}
+	if len(data)%5 != 0 {
+		t.Fatalf("seq fixture size=%d want multiple of 5", len(data))
+	}
+	type seqEvent struct {
+		reg   uint16
+		value uint8
+		delay uint16
+	}
+	events := make([]seqEvent, 0, len(data)/5)
+	for i := 0; i < len(data); i += 5 {
+		events = append(events, seqEvent{
+			reg:   binary.LittleEndian.Uint16(data[i : i+2]),
+			value: data[i+2],
+			delay: binary.LittleEndian.Uint16(data[i+3 : i+5]),
+		})
+	}
+	opl := NewOPL2(sampleRate)
+	pcm := make([]int16, 0, frames*2)
+	eventIndex := 0
+	framesUntilNext := 0
+	tickFrames := sampleRate / wolfMusicTickRate
+	if tickFrames < 1 {
+		tickFrames = 1
+	}
+	for remaining := frames; remaining > 0; {
+		for framesUntilNext <= 0 {
+			ev := events[eventIndex]
+			eventIndex++
+			if eventIndex >= len(events) {
+				eventIndex = 0
+			}
+			opl.WriteReg(ev.reg, ev.value)
+			framesUntilNext = int(ev.delay) * tickFrames
+			if framesUntilNext > 0 {
+				break
+			}
+		}
+		chunk := remaining
+		if framesUntilNext > 0 && chunk > framesUntilNext {
+			chunk = framesUntilNext
+		}
+		if chunk <= 0 {
+			chunk = 1
+		}
+		out := opl.GenerateStereoS16(chunk)
+		pcm = append(pcm, out...)
+		remaining -= chunk
+		framesUntilNext -= chunk
+	}
+	return pcm
+}
+
+func filterSeqForChannel(t *testing.T, src string, ch int) string {
+	t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("read seq fixture: %v", err)
+	}
+	slotToChannel := [32]int{
+		0, 1, 2, 0, 1, 2, -1, -1,
+		3, 4, 5, 3, 4, 5, -1, -1,
+		6, 7, 8, 6, 7, 8, -1, -1,
+		-1, -1, -1, -1, -1, -1, -1, -1,
+	}
+	keepReg := func(reg uint16) bool {
+		r := int(reg)
+		switch {
+		case r == 0x01 || r == 0x08 || r == 0xBD:
+			return true
+		case r >= 0xA0 && r <= 0xA8:
+			return r-0xA0 == ch
+		case r >= 0xB0 && r <= 0xB8:
+			return r-0xB0 == ch
+		case r >= 0xC0 && r <= 0xC8:
+			return r-0xC0 == ch
+		case r >= 0x20 && r <= 0x35:
+			slot := r - 0x20
+			return slot >= 0 && slot < len(slotToChannel) && slotToChannel[slot] == ch
+		case r >= 0x40 && r <= 0x55:
+			slot := r - 0x40
+			return slot >= 0 && slot < len(slotToChannel) && slotToChannel[slot] == ch
+		case r >= 0x60 && r <= 0x75:
+			slot := r - 0x60
+			return slot >= 0 && slot < len(slotToChannel) && slotToChannel[slot] == ch
+		case r >= 0x80 && r <= 0x95:
+			slot := r - 0x80
+			return slot >= 0 && slot < len(slotToChannel) && slotToChannel[slot] == ch
+		case r >= 0xE0 && r <= 0xF5:
+			slot := r - 0xE0
+			return slot >= 0 && slot < len(slotToChannel) && slotToChannel[slot] == ch
+		default:
+			return false
+		}
+	}
+
+	tmp, err := os.CreateTemp("", "impsynth-ch-*.seq")
+	if err != nil {
+		t.Fatalf("create temp seq: %v", err)
+	}
+	for i := 0; i+4 < len(data); i += 5 {
+		reg := binary.LittleEndian.Uint16(data[i : i+2])
+		if keepReg(reg) {
+			if _, err := tmp.Write(data[i : i+5]); err != nil {
+				_ = tmp.Close()
+				t.Fatalf("write temp seq: %v", err)
+			}
+		}
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatalf("close temp seq: %v", err)
+	}
+	return tmp.Name()
+}
+
+func sliceStereoFrames(pcm []int16, frameOffset int, frameCount int) []int16 {
+	if frameOffset < 0 {
+		frameOffset = 0
+	}
+	if frameCount < 0 {
+		frameCount = 0
+	}
+	start := frameOffset * 2
+	if start > len(pcm) {
+		start = len(pcm)
+	}
+	end := start + frameCount*2
+	if end > len(pcm) {
+		end = len(pcm)
+	}
+	out := make([]int16, end-start)
+	copy(out, pcm[start:end])
+	return out
 }
 
 func maxPCMDelta(a []int16, b []int16) int {
@@ -573,6 +780,72 @@ func monoAbsEnergy(pcm []int16) int64 {
 		total += s
 	}
 	return total
+}
+
+func monoFrames(pcm []int16) []float64 {
+	out := make([]float64, 0, len(pcm)/2)
+	for i := 0; i+1 < len(pcm); i += 2 {
+		out = append(out, float64(int(pcm[i])+int(pcm[i+1]))/2.0)
+	}
+	return out
+}
+
+func normalizedMagnitudeSpectrum(pcm []int16, fftSize int) []float64 {
+	frames := monoFrames(pcm)
+	if fftSize <= 0 {
+		fftSize = 256
+	}
+	if len(frames) < fftSize {
+		fftSize = len(frames)
+	}
+	if fftSize < 8 {
+		return nil
+	}
+
+	windowed := make([]float64, fftSize)
+	for i := 0; i < fftSize; i++ {
+		w := 0.5 - 0.5*math.Cos((2*math.Pi*float64(i))/float64(fftSize-1))
+		windowed[i] = frames[i] * w
+	}
+
+	bins := fftSize/2 + 1
+	spec := make([]float64, bins)
+	var sum float64
+	for k := 0; k < bins; k++ {
+		var re, im float64
+		for n := 0; n < fftSize; n++ {
+			phase := -2 * math.Pi * float64(k*n) / float64(fftSize)
+			re += windowed[n] * math.Cos(phase)
+			im += windowed[n] * math.Sin(phase)
+		}
+		mag := math.Hypot(re, im)
+		spec[k] = mag
+		sum += mag
+	}
+	if sum > 0 {
+		for i := range spec {
+			spec[i] /= sum
+		}
+	}
+	return spec
+}
+
+func spectrumCosineSimilarity(a []int16, b []int16, fftSize int) float64 {
+	sa := normalizedMagnitudeSpectrum(a, fftSize)
+	sb := normalizedMagnitudeSpectrum(b, fftSize)
+	if len(sa) == 0 || len(sb) == 0 || len(sa) != len(sb) {
+		return 0
+	}
+	var dot, na, nb float64
+	for i := range sa {
+		dot += sa[i] * sb[i]
+		na += sa[i] * sa[i]
+		nb += sb[i] * sb[i]
+	}
+	if na == 0 || nb == 0 {
+		return 0
+	}
+	return dot / math.Sqrt(na*nb)
 }
 
 func TestNewOPL2MelodicOutputTracksNuked(t *testing.T) {
@@ -711,6 +984,97 @@ func TestSharewareMusicFixturesPresent(t *testing.T) {
 		if int(info.Size()/5) != song.Count {
 			t.Fatalf("fixture %s event_count=%d want %d", path, info.Size()/5, song.Count)
 		}
+	}
+}
+
+func TestSharewareMusicSnippetsComparableToNuked(t *testing.T) {
+	cases := []struct {
+		name      string
+		file      string
+		skip      int
+		frames    int
+		maxDelta  int
+		energyMul int64
+		minSpec   float64
+	}{
+		{
+			name:      "menu_wonderin",
+			file:      filepath.Join("testdata", "wolf3d-shareware-music", "14-wonderin.seq"),
+			skip:      16384,
+			frames:    2048,
+			maxDelta:  24000,
+			energyMul: 3,
+			minSpec:   0.75,
+		},
+		{
+			name:      "action_getthem",
+			file:      filepath.Join("testdata", "wolf3d-shareware-music", "03-getthem.seq"),
+			skip:      16384,
+			frames:    2048,
+			maxDelta:  28000,
+			energyMul: 3,
+			minSpec:   0.60,
+		},
+		{
+			name:      "intermission_endlevel",
+			file:      filepath.Join("testdata", "wolf3d-shareware-music", "16-endlevel.seq"),
+			skip:      8192,
+			frames:    2048,
+			maxDelta:  24000,
+			energyMul: 3,
+			minSpec:   0.75,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			totalFrames := tc.skip + tc.frames
+			gotAll := renderImpSynthOPL2Seq(t, 49716, totalFrames, tc.file)
+			wantAll := renderNukedSeqPCM(t, 49716, totalFrames, tc.file)
+			got := sliceStereoFrames(gotAll, tc.skip, tc.frames)
+			want := sliceStereoFrames(wantAll, tc.skip, tc.frames)
+			if !pcmHasSignal(got) || !pcmHasSignal(want) {
+				t.Fatal("expected both renderers to produce audible music")
+			}
+			if delta := maxPCMDelta(got, want); delta > tc.maxDelta {
+				t.Fatalf("music snippet delta too large: %d", delta)
+			}
+			gotEnergy := monoAbsEnergy(got)
+			wantEnergy := monoAbsEnergy(want)
+			if gotEnergy*tc.energyMul < wantEnergy || wantEnergy*tc.energyMul < gotEnergy {
+				t.Fatalf("music snippet energy diverged too far: got=%d want=%d", gotEnergy, wantEnergy)
+			}
+			if sim := spectrumCosineSimilarity(got, want, 512); sim < tc.minSpec {
+				t.Fatalf("music snippet spectral similarity too low: %.3f", sim)
+			}
+		})
+	}
+}
+
+func TestGetThemChannel1ComparableToNuked(t *testing.T) {
+	src := filepath.Join("testdata", "wolf3d-shareware-music", "03-getthem.seq")
+	seq := filterSeqForChannel(t, src, 1)
+	defer os.Remove(seq)
+
+	const skip = 16384
+	const frames = 2048
+	totalFrames := skip + frames
+
+	gotAll := renderImpSynthOPL2Seq(t, 49716, totalFrames, seq)
+	wantAll := renderNukedSeqPCM(t, 49716, totalFrames, seq)
+	got := sliceStereoFrames(gotAll, skip, frames)
+	want := sliceStereoFrames(wantAll, skip, frames)
+
+	if !pcmHasSignal(got) || !pcmHasSignal(want) {
+		t.Fatal("expected both renderers to produce audible channel output")
+	}
+	if sim := spectrumCosineSimilarity(got, want, 512); sim < 0.75 {
+		t.Fatalf("channel 1 spectral similarity too low: %.3f", sim)
+	}
+	gotEnergy := monoAbsEnergy(got)
+	wantEnergy := monoAbsEnergy(want)
+	if gotEnergy*2 < wantEnergy || wantEnergy*2 < gotEnergy {
+		t.Fatalf("channel 1 energy diverged too far: got=%d want=%d", gotEnergy, wantEnergy)
 	}
 }
 
