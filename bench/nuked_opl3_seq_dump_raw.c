@@ -98,11 +98,11 @@ int main(int argc, char **argv) {
     for (uint32_t frame = 0; frame < frames; frame++) {
         int16_t pcm[2];
         size_t consumed_immediate = 0;
-        while (frames_until_next == 0) {
+        if (event_index >= event_count && frames_until_next == 0) {
+            frames_until_next = frames - frame;
+        }
+        while (frames_until_next == 0 && event_index < event_count) {
             seq_event ev = events[event_index++];
-            if (event_index >= event_count) {
-                event_index = 0;
-            }
             OPL3_WriteReg(&chip, ev.reg, ev.value);
             frames_until_next = (uint32_t)ev.delay * (sample_rate / tick_rate);
             if (frames_until_next > 0) {
@@ -113,7 +113,7 @@ int main(int argc, char **argv) {
                 break;
             }
         }
-        if (consumed_immediate >= event_count && frames_until_next == 0) {
+        if ((consumed_immediate >= event_count || event_index >= event_count) && frames_until_next == 0) {
             frames_until_next = frames - frame;
         }
         OPL3_Generate(&chip, pcm);
