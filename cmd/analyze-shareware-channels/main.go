@@ -230,45 +230,22 @@ func analyzeCorpus(title, manifestPath, baseDir string, defaultTickRate, channel
 		TickRate: tickRate,
 		Songs:    make([]songMetric, 0, len(m.Songs)),
 	}
-	limit := runtime.NumCPU()
-	if limit < 1 {
-		limit = 1
-	}
-	swg := sizedwaitgroup.New(limit)
-	errCh := make(chan error, len(m.Songs))
-	var mu sync.Mutex
 	for _, song := range m.Songs {
-		song := song
-		swg.Add()
-		go func() {
-			defer swg.Done()
-			label := strings.TrimSpace(song.Name)
-			if label == "" {
-				label = strings.TrimSpace(song.Lump)
-			}
-			path := filepath.Join(baseDir, song.File)
-			metric, err := analyzeSong(safeSlug(filepath.Base(baseDir)), label, path, tickRate, channels, newSynth)
-			if err != nil {
-				errCh <- err
-				return
-			}
-			mu.Lock()
-			out.Songs = append(out.Songs, metric)
-			finalizeCorpus(&out)
-			snapshot := cloneCorpus(out)
-			mu.Unlock()
-			if progress != nil {
-				if err := progress(snapshot); err != nil {
-					errCh <- err
-				}
-			}
-		}()
-	}
-	swg.Wait()
-	close(errCh)
-	for err := range errCh {
+		label := strings.TrimSpace(song.Name)
+		if label == "" {
+			label = strings.TrimSpace(song.Lump)
+		}
+		path := filepath.Join(baseDir, song.File)
+		metric, err := analyzeSong(safeSlug(filepath.Base(baseDir)), label, path, tickRate, channels, newSynth)
 		if err != nil {
 			return corpusMetric{}, err
+		}
+		out.Songs = append(out.Songs, metric)
+		finalizeCorpus(&out)
+		if progress != nil {
+			if err := progress(cloneCorpus(out)); err != nil {
+				return corpusMetric{}, err
+			}
 		}
 	}
 	finalizeCorpus(&out)
