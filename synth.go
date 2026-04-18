@@ -1042,7 +1042,6 @@ func (o *Synth) advanceOperatorPhase(c *impSynthChannelState, op *impSynthOperat
 	phase := int(uint16(op.pgPhase >> oplPhaseFracBits))
 	if op.phaseReset {
 		op.pgPhase = 0
-		phase = 0
 		op.phaseReset = false
 	}
 
@@ -1070,7 +1069,6 @@ func advanceOperatorPhaseNoVib(c *impSynthChannelState, op *impSynthOperatorStat
 	phase := int(uint16(op.pgPhase >> oplPhaseFracBits))
 	if op.phaseReset {
 		op.pgPhase = 0
-		phase = 0
 		op.phaseReset = false
 	}
 	baseFreq := (int(c.fnum) << c.block) >> 1
@@ -1096,7 +1094,6 @@ func (o *Synth) keyOffChannel(ch int) {
 	o.ch[ch].fbPrev = [2]int16{}
 	for op := range o.ch[ch].ops {
 		o.ch[ch].ops[op].keyMask &^= oplKeyMaskNormal
-		o.ch[ch].ops[op].stage = oplEnvRelease
 	}
 	o.syncChannelActive(ch)
 }
@@ -1148,7 +1145,6 @@ func (o *Synth) setDrumKey(ch int, op int, on bool) {
 		o.ch[ch].ops[op].keyMask |= oplKeyMaskDrum
 	} else {
 		o.ch[ch].ops[op].keyMask &^= oplKeyMaskDrum
-		o.ch[ch].ops[op].stage = oplEnvRelease
 	}
 }
 
