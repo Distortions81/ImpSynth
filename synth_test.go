@@ -33,6 +33,7 @@ const (
 	exampleSongChunkSize  = 1024
 	exampleSongReleaseMS  = 250
 	wolfMusicTickRate     = 700
+	doomMusicTickRate     = 140
 )
 
 type benchmarkNoteEvent struct {
@@ -566,10 +567,10 @@ func buildNukedSeqDumpTool(t *testing.T) string {
 	return nukedSeqDumpPath
 }
 
-func renderNukedSeqPCM(t *testing.T, sampleRate int, frames int, seqPath string) []int16 {
+func renderNukedSeqPCMAtTickRate(t *testing.T, sampleRate int, tickRate int, frames int, seqPath string) []int16 {
 	t.Helper()
 	tool := buildNukedSeqDumpTool(t)
-	cmd := exec.Command(tool, strconv.Itoa(sampleRate), strconv.Itoa(wolfMusicTickRate), strconv.Itoa(frames), seqPath)
+	cmd := exec.Command(tool, strconv.Itoa(sampleRate), strconv.Itoa(tickRate), strconv.Itoa(frames), seqPath)
 	cmd.Dir = "."
 	output, err := cmd.Output()
 	if err != nil {
@@ -602,6 +603,11 @@ func renderNukedSeqPCM(t *testing.T, sampleRate int, frames int, seqPath string)
 	return pcm
 }
 
+func renderNukedSeqPCM(t *testing.T, sampleRate int, frames int, seqPath string) []int16 {
+	t.Helper()
+	return renderNukedSeqPCMAtTickRate(t, sampleRate, wolfMusicTickRate, frames, seqPath)
+}
+
 func renderImpSynthOPL2(sampleRate int, frames int, regs []uint16) []int16 {
 	opl := NewOPL2(sampleRate)
 	for i := 0; i+1 < len(regs); i += 2 {
@@ -613,7 +619,7 @@ func renderImpSynthOPL2(sampleRate int, frames int, regs []uint16) []int16 {
 	return pcm
 }
 
-func renderImpSynthOPL2Seq(t *testing.T, sampleRate int, frames int, seqPath string) []int16 {
+func renderImpSynthSeqAtTickRate(t *testing.T, sampleRate int, tickRate int, frames int, seqPath string, newSynth func(int) *Synth) []int16 {
 	t.Helper()
 	data, err := os.ReadFile(seqPath)
 	if err != nil {
@@ -635,11 +641,11 @@ func renderImpSynthOPL2Seq(t *testing.T, sampleRate int, frames int, seqPath str
 			delay: binary.LittleEndian.Uint16(data[i+3 : i+5]),
 		})
 	}
-	opl := NewOPL2(sampleRate)
+	opl := newSynth(sampleRate)
 	pcm := make([]int16, 0, frames*2)
 	eventIndex := 0
 	framesUntilNext := 0
-	tickFrames := sampleRate / wolfMusicTickRate
+	tickFrames := sampleRate / tickRate
 	if tickFrames < 1 {
 		tickFrames = 1
 	}
@@ -669,6 +675,16 @@ func renderImpSynthOPL2Seq(t *testing.T, sampleRate int, frames int, seqPath str
 		framesUntilNext -= chunk
 	}
 	return pcm
+}
+
+func renderImpSynthOPL2Seq(t *testing.T, sampleRate int, frames int, seqPath string) []int16 {
+	t.Helper()
+	return renderImpSynthSeqAtTickRate(t, sampleRate, wolfMusicTickRate, frames, seqPath, NewOPL2)
+}
+
+func renderImpSynthSeq(t *testing.T, sampleRate int, tickRate int, frames int, seqPath string) []int16 {
+	t.Helper()
+	return renderImpSynthSeqAtTickRate(t, sampleRate, tickRate, frames, seqPath, New)
 }
 
 func filterSeqForChannel(t *testing.T, src string, ch int) string {
@@ -1075,6 +1091,113 @@ func TestGetThemChannel1ComparableToNuked(t *testing.T) {
 	wantEnergy := monoAbsEnergy(want)
 	if gotEnergy*2 < wantEnergy || wantEnergy*2 < gotEnergy {
 		t.Fatalf("channel 1 energy diverged too far: got=%d want=%d", gotEnergy, wantEnergy)
+	}
+}
+
+func TestDOOMSharewareMusicFixturesPresent(t *testing.T) {
+	type manifestEntry struct {
+		Lump  string `json:"lump"`
+		File  string `json:"file"`
+		Count int    `json:"event_count"`
+	}
+	type manifest struct {
+		Source  string          `json:"source"`
+		Format  string          `json:"format"`
+		TicRate int             `json:"tic_rate"`
+		Songs   []manifestEntry `json:"songs"`
+	}
+
+	data, err := os.ReadFile(filepath.Join("testdata", "doom-shareware-music", "manifest.json"))
+	if err != nil {
+		t.Fatalf("read doom shareware music manifest: %v", err)
+	}
+	var m manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("parse doom shareware music manifest: %v", err)
+	}
+	if m.Source == "" || len(m.Songs) == 0 {
+		t.Fatal("expected doom shareware music manifest entries")
+	}
+	if m.TicRate != doomMusicTickRate {
+		t.Fatalf("doom tic rate=%d want %d", m.TicRate, doomMusicTickRate)
+	}
+	if got := len(m.Songs); got != 13 {
+		t.Fatalf("doom shareware song count=%d want 13", got)
+	}
+	for _, song := range m.Songs {
+		if song.File == "" || song.Count <= 0 || song.Lump == "" {
+			t.Fatalf("invalid doom manifest entry: %+v", song)
+		}
+		path := filepath.Join("testdata", "doom-shareware-music", song.File)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if info.Size() <= 0 || info.Size()%5 != 0 {
+			t.Fatalf("fixture %s size=%d want positive multiple of 5", path, info.Size())
+		}
+		if int(info.Size()/5) != song.Count {
+			t.Fatalf("fixture %s event_count=%d want %d", path, info.Size()/5, song.Count)
+		}
+	}
+}
+
+func TestDOOMSharewareMusicSnippetsComparableToNuked(t *testing.T) {
+	type manifestEntry struct {
+		Lump  string `json:"lump"`
+		File  string `json:"file"`
+		Count int    `json:"event_count"`
+	}
+	type manifest struct {
+		TicRate int             `json:"tic_rate"`
+		Songs   []manifestEntry `json:"songs"`
+	}
+
+	data, err := os.ReadFile(filepath.Join("testdata", "doom-shareware-music", "manifest.json"))
+	if err != nil {
+		t.Fatalf("read doom shareware music manifest: %v", err)
+	}
+	var m manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("parse doom shareware music manifest: %v", err)
+	}
+	if m.TicRate != doomMusicTickRate {
+		t.Fatalf("doom tic rate=%d want %d", m.TicRate, doomMusicTickRate)
+	}
+
+	const skip = 16384
+	const frames = 2048
+	const totalFrames = skip + frames
+
+	for _, song := range m.Songs {
+		path := filepath.Join("testdata", "doom-shareware-music", song.File)
+		t.Run(strings.ToLower(song.Lump), func(t *testing.T) {
+			gotAll := renderImpSynthSeq(t, 49716, doomMusicTickRate, totalFrames, path)
+			wantAll := renderNukedSeqPCMAtTickRate(t, 49716, doomMusicTickRate, totalFrames, path)
+			got := sliceStereoFrames(gotAll, skip, frames)
+			want := sliceStereoFrames(wantAll, skip, frames)
+			if !pcmHasSignal(got) || !pcmHasSignal(want) {
+				t.Fatal("expected both renderers to produce audible music")
+			}
+			delta := maxPCMDelta(got, want)
+			gotEnergy := monoAbsEnergy(got)
+			wantEnergy := monoAbsEnergy(want)
+			sim := spectrumCosineSimilarity(got, want, 512)
+			ratio := 0.0
+			if wantEnergy > 0 {
+				ratio = float64(gotEnergy) / float64(wantEnergy)
+			}
+			t.Logf("doom shareware %s: spec=%.3f energy=%.3fx delta=%d", song.Lump, sim, ratio, delta)
+			if delta > 12000 {
+				t.Fatalf("doom music snippet delta too large: %d", delta)
+			}
+			if gotEnergy*5 < wantEnergy*4 || wantEnergy*5 < gotEnergy*4 {
+				t.Fatalf("doom music snippet energy diverged too far: got=%d want=%d", gotEnergy, wantEnergy)
+			}
+			if sim < 0.98 {
+				t.Fatalf("doom music snippet spectral similarity too low: %.3f", sim)
+			}
+		})
 	}
 }
 
