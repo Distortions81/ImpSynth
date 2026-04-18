@@ -2,20 +2,58 @@
 
 This plan uses the current whole-song findings in [shareware-channel-findings.md](/home/dist/github/ImpSynth/docs/shareware-channel-findings.md:1) and orders work from worst mismatch to best.
 
-## 1. Wolf3D melodic channels with very low spectral match
+Important correction:
+- The earlier `SUSPENSE` ch `7` result was mostly a metric artifact caused by near-silent 1-LSB tail chunks.
+- After tightening the chunk gate, the real remaining top issue is a shared Wolf `channel 1` voice family.
+
+## 1. Shared Wolf channel 1 voice family
 
 Highest-value targets:
-- `SUSPENSE` ch `7` spec `0.052`
-- `SUSPENSE` ch `4` spec `0.120`
-- `NAZI_NOR` ch `1` spec `0.131`
-- `URAHERO` ch `6` spec `0.135`
-- `02-untitled` ch `2` spec `0.185`
-- `POW` ch `7` spec `0.187`
+- `SUSPENSE` ch `1` spec `0.713`, ratio `0.992x`
+- `GETTHEM` ch `1` spec `0.725`, ratio `1.530x`
+- `SEARCHN` ch `1` spec `0.732`, ratio `1.536x`
+- `02-untitled` ch `1` spec `0.725`, ratio `1.551x`
 
 Why this is first:
-- These are the lowest whole-song matches in the report.
-- Most of them still have energy ratios near `1.0x`, so the bug is more likely `tone/shape` than simple loudness.
-- This is the best place to find remaining operator, phase, feedback, or waveform mismatches.
+- This is one patch family showing up across several of the worst Wolf songs.
+- Fixing it should move multiple top offenders at once.
+- `GETTHEM`, `SEARCHN`, and `02-untitled` all switch into the same high-feedback configuration on this lane.
+
+Known shared characteristics:
+- same initial operator patch setup
+- repeated key on/off pattern
+- FM algorithm
+- later switch to `C1 = 0x0e` in several songs, meaning `feedback = 7`
+
+Current conclusion:
+- this is not just a report-noise issue
+- it is also not the earlier zero-delay analysis bug
+- the remaining issue is likely in the synth path for this voice class, not fixture generation
+
+Plan:
+1. Build one focused regression around the shared channel-1 patch family, not per-song in isolation.
+2. Compare the same lane across `SUSPENSE`, `GETTHEM`, `SEARCHN`, and `02-untitled`.
+3. Prioritize fixes that improve all four together.
+4. Treat `GETTHEM` and `SEARCHN` as the strongest energy-mismatch checks.
+
+Expected likely causes:
+- high-feedback FM behavior
+- modulation-depth handling on this voice family
+- repeated note/keying behavior under the same patch
+
+## 2. Wolf3D other remaining low-match channels
+
+Highest-value targets:
+- `URAHERO` ch `6` spec `0.753`
+- `POW` ch `7` spec `0.753`
+- `ENDLEVEL` ch `2` spec `0.761`
+- `NAZI_NOR` ch `1` spec `0.764`
+- `23-untitled` ch `6` spec `0.788`
+- `CORNER` ch `6` spec `0.804`
+
+Why this is first:
+- These are now the next-lowest real whole-song matches after the chunk-gating fix.
+- Most still have energy ratios near `1.0x`, so they remain good candidates for tone/shape bugs rather than simple loudness.
 
 Plan:
 1. Dump register traces for these channels and classify the patch type:
@@ -25,24 +63,24 @@ Plan:
 4. Build one focused regression fixture per bug class once identified.
 
 Expected likely causes:
-- high-feedback behavior
-- alternate waveform handling
-- channel algorithm / modulator-carrier interaction
+- non-feedback FM shape differences
 - envelope progression or retrigger edge cases
+- specific lane behavior that is separate from the shared channel-1 family
 
-## 2. Wolf3D channels with large level mismatch
+## 3. Wolf3D channels with large level mismatch
 
 Highest-value targets:
-- `SEARCHN` ch `1` energy `1.536x`
 - `GETTHEM` ch `1` energy `1.530x`
+- `SEARCHN` ch `1` energy `1.536x`
+- `02-untitled` ch `1` energy `1.551x`
 - `GETTHEM` ch `2` energy `1.603x`
 - `SUSPENSE` ch `2` energy `1.633x`
 - `SUSPENSE` ch `3` energy `1.250x`
 - `ENDLEVEL` ch `2` energy `0.559x`
 
 Why this is next:
-- These are likely easier to fix than the very-low-spectrum channels.
-- We already know `GETTHEM` ch `1` is a long-running high-feedback case.
+- These overlap heavily with the shared channel-1 family above.
+- The strongest remaining level issue is not random drift; it clusters around the same Wolf voice family.
 - The spectral match is often moderate here, which suggests the structure is mostly right and the remaining issue is gain/depth.
 
 Plan:
@@ -58,7 +96,7 @@ Expected likely causes:
 - envelope attenuation differences
 - carrier modulation depth
 
-## 3. Wolf3D channels with huge max-delta spikes
+## 4. Wolf3D channels with huge max-delta spikes
 
 Highest-value targets:
 - `02-untitled` ch `2` max delta `8159`
@@ -79,7 +117,7 @@ Plan:
 3. If it is transient, look at key-on ordering and envelope reset behavior.
 4. If it is sustained, treat it as a patch math issue and fold it into section 1 or 2.
 
-## 4. DOOM short intro outliers
+## 5. DOOM short intro outliers
 
 Highest-value targets:
 - `D_INTROA` ch `2` spec `0.253`
@@ -98,7 +136,7 @@ Plan:
 2. Check whether the same bug class explains both Wolf and DOOM outliers.
 3. Only create DOOM-specific fixes if they do not collapse into the same root cause.
 
-## 5. DOOM broad “good but not perfect” long-song quality
+## 6. DOOM broad “good but not perfect” long-song quality
 
 Representative tracks:
 - `D_INTER` mean spec `0.707`
@@ -115,7 +153,7 @@ Plan:
 1. Re-run the whole-song report after each major fix from sections 1-4.
 2. Only drill into these songs if they remain stubborn after the targeted fixes land.
 
-## 6. Near-match cleanup
+## 7. Near-match cleanup
 
 Examples:
 - `WONDERIN`
@@ -135,17 +173,17 @@ Plan:
 ## Recommended work order
 
 1. `SUSPENSE` ch `7`
-2. `NAZI_NOR` ch `1`
-3. `URAHERO` ch `6`
-4. `02-untitled` ch `2`
-5. `GETTHEM` ch `1`
-6. `SEARCHN` ch `1`
+2. `GETTHEM` ch `1`
+3. `SEARCHN` ch `1`
+4. `02-untitled` ch `1`
+5. `URAHERO` ch `6`
+6. `ENDLEVEL` ch `2`
 7. `D_INTROA` ch `2`
 8. `D_INTRO` ch `10`
 
 ## Success criteria
 
-- Raise the worst Wolf channels above roughly `0.5` spectral similarity.
-- Bring major Wolf energy outliers closer to `1.0x`, especially `GETTHEM` and `SEARCHN`.
+- Raise the shared Wolf channel-1 family into the `0.85+` range.
+- Bring major Wolf energy outliers closer to `1.0x`, especially `GETTHEM`, `SEARCHN`, and `02-untitled`.
 - Raise `D_INTROA` out of the `0.25-0.35` range.
 - Re-run the full whole-song report after each fix batch and reorder this plan based on the new worst channels.
