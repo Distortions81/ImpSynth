@@ -22,7 +22,7 @@ import (
 const (
 	sampleRate      = 49716
 	windowFrames    = 2048
-	chunkFrames     = 512
+	chunkFrames     = 8192
 	wolfTickRate    = 700
 	doomTickRate    = 140
 	minWindowEnergy = 64

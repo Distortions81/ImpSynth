@@ -1,2 +1,3 @@
 .cache/
 *.test
+testdata/shareware-render-cache/nuked/*
