@@ -6,7 +6,7 @@
 
 **Demo Song: DOOM: E1M1: Hangar Song: At Doom's Gate on YouTube**
 
-`impsynth` is a small Go OPL3-style FM synth library.
+`impsynth` is a small Go OPL2-style FM synth library.
 
 It focuses on the practical DMX/Doom-style register subset:
 - 2-op voices
