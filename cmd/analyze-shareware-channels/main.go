@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/binary"
 	"encoding/json"
 	"flag"
@@ -23,6 +22,7 @@ import (
 const (
 	sampleRate      = 49716
 	windowFrames    = 2048
+	chunkFrames     = 512
 	wolfTickRate    = 700
 	doomTickRate    = 140
 	minWindowEnergy = 64
@@ -72,19 +72,71 @@ type corpusMetric struct {
 	WorstChannel channelMetric
 }
 
+type renderedChannel struct {
+	channel  int
+	renderer string
+	chunks   [][]int16
+}
+
+type chunkMetric struct {
+	channel    int
+	spec       float64
+	gotEnergy  int64
+	wantEnergy int64
+	maxDelta   int
+	weight     float64
+}
+
+type channelAccumulator struct {
+	specWeighted float64
+	weightTotal  float64
+	gotEnergy    int64
+	wantEnergy   int64
+	maxDelta     int
+}
+
+type chunkKey struct {
+	channel int
+	chunk   int
+}
+
+type renderJob struct {
+	key       chunkKey
+	seqPath   string
+	cachePath string
+	tickRate  int
+	start     int
+	frames    int
+	renderer  string
+	newSynth  func(int) *impsynth.Synth
+}
+
+type renderResult struct {
+	key      chunkKey
+	renderer string
+	pcm      []int16
+}
+
 var (
-	nukedToolOnce sync.Once
-	nukedToolPath string
-	nukedToolErr  error
+	nukedToolOnce  sync.Once
+	nukedToolPath  string
+	nukedToolErr   error
+	renderCacheDir string
 )
 
 func main() {
 	var outPath string
 	flag.StringVar(&outPath, "out", filepath.Join("docs", "shareware-channel-findings.md"), "output markdown path")
+	flag.StringVar(&renderCacheDir, "render-cache", filepath.Join("testdata", "shareware-render-cache"), "directory for reusable render cache data")
 	flag.Parse()
 
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 		fail(err)
+	}
+	if renderCacheDir != "" {
+		if err := os.MkdirAll(renderCacheDir, 0o755); err != nil {
+			fail(err)
+		}
 	}
 
 	var wolf corpusMetric
@@ -135,6 +187,29 @@ func fail(err error) {
 	os.Exit(1)
 }
 
+func safeSlug(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		default:
+			if !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "unnamed"
+	}
+	return out
+}
+
 func analyzeCorpus(title, manifestPath, baseDir string, defaultTickRate, channels int, newSynth func(int) *impsynth.Synth, progress func(corpusMetric) error) (corpusMetric, error) {
 	var m manifest
 	data, err := os.ReadFile(manifestPath)
@@ -172,7 +247,7 @@ func analyzeCorpus(title, manifestPath, baseDir string, defaultTickRate, channel
 				label = strings.TrimSpace(song.Lump)
 			}
 			path := filepath.Join(baseDir, song.File)
-			metric, err := analyzeSong(label, path, tickRate, channels, newSynth)
+			metric, err := analyzeSong(safeSlug(filepath.Base(baseDir)), label, path, tickRate, channels, newSynth)
 			if err != nil {
 				errCh <- err
 				return
@@ -200,7 +275,7 @@ func analyzeCorpus(title, manifestPath, baseDir string, defaultTickRate, channel
 	return out, nil
 }
 
-func analyzeSong(label, path string, tickRate, channels int, newSynth func(int) *impsynth.Synth) (songMetric, error) {
+func analyzeSong(corpusSlug, label, path string, tickRate, channels int, newSynth func(int) *impsynth.Synth) (songMetric, error) {
 	windowStart, err := findWindow(path, tickRate, newSynth)
 	if err != nil {
 		return songMetric{}, fmt.Errorf("find window for %s: %w", label, err)
@@ -217,29 +292,146 @@ func analyzeSong(label, path string, tickRate, channels int, newSynth func(int) 
 		Channels: make([]channelMetric, 0, len(active)),
 		MinSpec:  1,
 	}
+	tempSeqs := make(map[int]string, len(active))
+	defer func() {
+		for _, p := range tempSeqs {
+			_ = os.Remove(p)
+		}
+	}()
 	for _, ch := range active {
 		tmp, err := filterSeqForChannel(path, ch)
 		if err != nil {
 			return songMetric{}, fmt.Errorf("filter %s ch%d: %w", label, ch, err)
 		}
-		gotAll, err := renderImpSynthSeq(sampleRate, tickRate, windowStart+windowFrames, tmp, newSynth)
-		if err != nil {
-			_ = os.Remove(tmp)
-			return songMetric{}, fmt.Errorf("render impsynth %s ch%d: %w", label, ch, err)
+		tempSeqs[ch] = tmp
+	}
+
+	totalChunks := (windowFrames + chunkFrames - 1) / chunkFrames
+	jobs := make([]renderJob, 0, len(active)*totalChunks*2)
+	for _, ch := range active {
+		for chunkIndex := 0; chunkIndex < totalChunks; chunkIndex++ {
+			start := windowStart + chunkIndex*chunkFrames
+			frames := min(chunkFrames, windowFrames-chunkIndex*chunkFrames)
+			key := chunkKey{channel: ch, chunk: chunkIndex}
+			jobs = append(jobs,
+				renderJob{
+					key:       key,
+					seqPath:   tempSeqs[ch],
+					cachePath: "",
+					tickRate:  tickRate,
+					start:     start,
+					frames:    frames,
+					renderer:  "impsynth",
+					newSynth:  newSynth,
+				},
+				renderJob{
+					key:       key,
+					seqPath:   tempSeqs[ch],
+					cachePath: nukedCachePath(corpusSlug, path, tickRate, key, start, frames),
+					tickRate:  tickRate,
+					start:     start,
+					frames:    frames,
+					renderer:  "nuked",
+				},
+			)
 		}
-		wantAll, err := renderNukedSeq(sampleRate, tickRate, windowStart+windowFrames, tmp)
-		_ = os.Remove(tmp)
+	}
+
+	rendered := make(map[chunkKey]map[string][]int16, len(jobs))
+	var renderMu sync.Mutex
+	renderErrCh := make(chan error, len(jobs))
+	limit := runtime.NumCPU()
+	if limit < 1 {
+		limit = 1
+	}
+	renderWG := sizedwaitgroup.New(limit)
+	for _, job := range jobs {
+		job := job
+		renderWG.Add()
+		go func() {
+			defer renderWG.Done()
+			pcm, err := runRenderJob(job)
+			if err != nil {
+				renderErrCh <- fmt.Errorf("%s render %s ch%d chunk%d: %w", job.renderer, label, job.key.channel, job.key.chunk, err)
+				return
+			}
+			renderMu.Lock()
+			entry := rendered[job.key]
+			if entry == nil {
+				entry = make(map[string][]int16, 2)
+				rendered[job.key] = entry
+			}
+			entry[job.renderer] = pcm
+			renderMu.Unlock()
+		}()
+	}
+	renderWG.Wait()
+	close(renderErrCh)
+	for err := range renderErrCh {
 		if err != nil {
-			return songMetric{}, fmt.Errorf("render nuked %s ch%d: %w", label, ch, err)
+			return songMetric{}, err
 		}
-		got := sliceStereoFrames(gotAll, windowStart, windowFrames)
-		want := sliceStereoFrames(wantAll, windowStart, windowFrames)
-		gotEnergy := monoAbsEnergy(got)
-		wantEnergy := monoAbsEnergy(want)
-		if gotEnergy < minWindowEnergy && wantEnergy < minWindowEnergy {
+	}
+
+	accumulators := make(map[int]*channelAccumulator, len(active))
+	var compareMu sync.Mutex
+	compareErrCh := make(chan error, len(rendered))
+	compareWG := sizedwaitgroup.New(limit)
+	for key, entry := range rendered {
+		gotChunk, okGot := entry["impsynth"]
+		wantChunk, okWant := entry["nuked"]
+		if !okGot || !okWant {
 			continue
 		}
-		spec := spectrumCosineSimilarity(got, want, 512)
+		key := key
+		gotPCM := gotChunk
+		wantPCM := wantChunk
+		compareWG.Add()
+		go func() {
+			defer compareWG.Done()
+			gotEnergy := monoAbsEnergy(gotPCM)
+			wantEnergy := monoAbsEnergy(wantPCM)
+			if gotEnergy < minWindowEnergy && wantEnergy < minWindowEnergy {
+				return
+			}
+			spec := spectrumCosineSimilarity(gotPCM, wantPCM, min(512, len(gotPCM)/2))
+			weight := float64(gotEnergy + wantEnergy)
+			if weight <= 0 {
+				weight = 1
+			}
+			delta := maxPCMDelta(gotPCM, wantPCM)
+			compareMu.Lock()
+			acc := accumulators[key.channel]
+			if acc == nil {
+				acc = &channelAccumulator{}
+				accumulators[key.channel] = acc
+			}
+			acc.specWeighted += spec * weight
+			acc.weightTotal += weight
+			acc.gotEnergy += gotEnergy
+			acc.wantEnergy += wantEnergy
+			if delta > acc.maxDelta {
+				acc.maxDelta = delta
+			}
+			compareMu.Unlock()
+		}()
+	}
+	compareWG.Wait()
+	close(compareErrCh)
+	for err := range compareErrCh {
+		if err != nil {
+			return songMetric{}, err
+		}
+	}
+
+	for _, ch := range active {
+		acc := accumulators[ch]
+		if acc == nil || acc.weightTotal == 0 {
+			continue
+		}
+		gotEnergy := acc.gotEnergy
+		wantEnergy := acc.wantEnergy
+		spec := acc.specWeighted / acc.weightTotal
 		ratio := 0.0
 		if wantEnergy > 0 {
 			ratio = float64(gotEnergy) / float64(wantEnergy)
@@ -248,7 +440,7 @@ func analyzeSong(label, path string, tickRate, channels int, newSynth func(int) 
 			Channel:     ch,
 			Spec:        spec,
 			EnergyRatio: ratio,
-			MaxDelta:    maxPCMDelta(got, want),
+			MaxDelta:    acc.maxDelta,
 			GotEnergy:   gotEnergy,
 			WantEnergy:  wantEnergy,
 		})
@@ -300,6 +492,77 @@ func findWindow(seqPath string, tickRate int, newSynth func(int) *impsynth.Synth
 	return bestStart, nil
 }
 
+func runRenderJob(job renderJob) ([]int16, error) {
+	totalFrames := job.start + job.frames
+	switch job.renderer {
+	case "impsynth":
+		all, err := renderImpSynthSeq(sampleRate, job.tickRate, totalFrames, job.seqPath, job.newSynth)
+		if err != nil {
+			return nil, err
+		}
+		return sliceStereoFrames(all, job.start, job.frames), nil
+	case "nuked":
+		if job.cachePath != "" {
+			if pcm, ok, err := readPCMCache(job.cachePath, job.frames); err != nil {
+				return nil, err
+			} else if ok {
+				return pcm, nil
+			}
+		}
+		all, err := renderNukedSeq(sampleRate, job.tickRate, totalFrames, job.seqPath)
+		if err != nil {
+			return nil, err
+		}
+		pcm := sliceStereoFrames(all, job.start, job.frames)
+		if job.cachePath != "" {
+			if err := writePCMCache(job.cachePath, pcm); err != nil {
+				return nil, err
+			}
+		}
+		return pcm, nil
+	default:
+		return nil, fmt.Errorf("unknown renderer %q", job.renderer)
+	}
+}
+
+func nukedCachePath(corpusSlug, songPath string, tickRate int, key chunkKey, start, frames int) string {
+	if renderCacheDir == "" {
+		return ""
+	}
+	songSlug := safeSlug(strings.TrimSuffix(filepath.Base(songPath), filepath.Ext(songPath)))
+	name := fmt.Sprintf("sr%d-tr%d-ch%02d-ck%02d-st%d-fr%d.pcm", sampleRate, tickRate, key.channel, key.chunk, start, frames)
+	return filepath.Join(renderCacheDir, "nuked", corpusSlug, songSlug, name)
+}
+
+func readPCMCache(path string, frames int) ([]int16, bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if len(data) != frames*4 {
+		return nil, false, nil
+	}
+	pcm := make([]int16, frames*2)
+	for i := 0; i < len(pcm); i++ {
+		pcm[i] = int16(binary.LittleEndian.Uint16(data[i*2 : i*2+2]))
+	}
+	return pcm, true, nil
+}
+
+func writePCMCache(path string, pcm []int16) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data := make([]byte, len(pcm)*2)
+	for i, sample := range pcm {
+		binary.LittleEndian.PutUint16(data[i*2:], uint16(sample))
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
 func renderImpSynthSeq(sampleRate, tickRate, frames int, seqPath string, newSynth func(int) *impsynth.Synth) ([]int16, error) {
 	events, err := readSeq(seqPath)
 	if err != nil {
@@ -348,7 +611,7 @@ func buildNukedSeqDumpTool() (string, error) {
 			"-O2",
 			"-I", "third_party/nuked-opl3",
 			"-o", out,
-			"bench/nuked_opl3_seq_dump.c",
+			"bench/nuked_opl3_seq_dump_raw.c",
 			"third_party/nuked-opl3/opl3.c",
 			"-lm",
 		)
@@ -377,25 +640,12 @@ func renderNukedSeq(sampleRate, tickRate, frames int, seqPath string) ([]int16, 
 	if err != nil {
 		return nil, err
 	}
-	pcm := make([]int16, 0, frames*2)
-	scanner := bufio.NewScanner(strings.NewReader(string(output)))
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) != 2 {
-			return nil, fmt.Errorf("unexpected nuked output line: %q", scanner.Text())
-		}
-		left, err := strconv.Atoi(fields[0])
-		if err != nil {
-			return nil, err
-		}
-		right, err := strconv.Atoi(fields[1])
-		if err != nil {
-			return nil, err
-		}
-		pcm = append(pcm, int16(left), int16(right))
+	if len(output) != frames*4 {
+		return nil, fmt.Errorf("unexpected raw nuked output size=%d want=%d", len(output), frames*4)
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+	pcm := make([]int16, frames*2)
+	for i := 0; i < len(pcm); i++ {
+		pcm[i] = int16(binary.LittleEndian.Uint16(output[i*2 : i*2+2]))
 	}
 	return pcm, nil
 }
@@ -535,6 +785,13 @@ func sliceStereoFrames(pcm []int16, frameOffset int, frameCount int) []int16 {
 	out := make([]int16, end-start)
 	copy(out, pcm[start:end])
 	return out
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func maxPCMDelta(a, b []int16) int {
