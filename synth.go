@@ -1053,6 +1053,7 @@ func (o *Synth) advanceOperatorPhase(c *impSynthChannelState, op *impSynthOperat
 	}
 	baseFreq := (fnum << c.block) >> 1
 	op.pgPhase += uint32((baseFreq * int(oplFrequencyMultiples[op.regMult])) >> 1)
+	o.advanceNoise()
 	return phase & oplWaveTableMask
 }
 
@@ -1371,7 +1372,6 @@ func (o *Synth) advanceChipState() {
 		o.egTimer++
 	}
 	o.egState ^= 1
-	o.advanceNoise()
 }
 
 func (o *Synth) advanceNoise() {
