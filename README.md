@@ -17,7 +17,7 @@ It focuses on the practical DMX/Doom-style register subset:
 - OPL-style register writes
 
 This implementation is based in part on the `Nuked-OPL3` OPL3 emulator by
-Nuke.YKT, adapted here into a smaller Go library focused on a subset of OPL3
+Nuke.YKT, adapted here into a smaller Go library focused on a subset of OPL2
 behavior.
 
 ## Install
