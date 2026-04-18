@@ -25,6 +25,8 @@ const (
 	wolfTickRate     = 700
 	doomTickRate     = 140
 	minChunkEnergy   = 64
+	minSpecChunkEnergy = 4096
+	minSpecChunkPeak   = 1
 )
 
 type manifestSong struct {
@@ -842,6 +844,22 @@ func sliceStereoFrames(pcm []int16, frameOffset int, frameCount int) []int16 {
 	return out
 }
 
+func chunkStats(pcm []int16) (int64, int) {
+	var energy int64
+	peak := 0
+	for i := 0; i+1 < len(pcm); i += 2 {
+		s := (int(pcm[i]) + int(pcm[i+1])) / 2
+		if s < 0 {
+			s = -s
+		}
+		energy += int64(s)
+		if s > peak {
+			peak = s
+		}
+	}
+	return energy, peak
+}
+
 func compareWholeSongPCM(got, want []int16) (float64, int64, int64, int) {
 	gotEnergy := monoAbsEnergy(got)
 	wantEnergy := monoAbsEnergy(want)
@@ -863,7 +881,10 @@ func compareWholeSongPCM(got, want []int16) (float64, int64, int64, int) {
 		}
 		gotChunk := sliceStereoFrames(got, start, chunkFrames)
 		wantChunk := sliceStereoFrames(want, start, chunkFrames)
-		if monoAbsEnergy(gotChunk) < minChunkEnergy && monoAbsEnergy(wantChunk) < minChunkEnergy {
+		gotChunkEnergy, gotPeak := chunkStats(gotChunk)
+		wantChunkEnergy, wantPeak := chunkStats(wantChunk)
+		if (gotChunkEnergy < minSpecChunkEnergy && wantChunkEnergy < minSpecChunkEnergy) ||
+			(gotPeak <= minSpecChunkPeak && wantPeak <= minSpecChunkPeak) {
 			continue
 		}
 		specSum += spectrumCosineSimilarity(gotChunk, wantChunk, 512)
