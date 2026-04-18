@@ -629,16 +629,18 @@ func (o *Synth) renderRhythmHighHatSnare() (int32, int32) {
 	o.rmHHBit3 = uint8((hhPhase >> 3) & 1)
 	o.rmHHBit7 = uint8((hhPhase >> 7) & 1)
 	o.rmHHBit8 = uint8((hhPhase >> 8) & 1)
+	hhNoise := oplAdvanceNoiseN(o.noise, 13)
 	hhRaw := 0
 	if operatorHasSound(hh) {
-		hhRaw = o.sampleOperator(hh, oplRhythmHighHatPhase(o.rmXor(), o.noise), 0)
+		hhRaw = o.sampleOperator(hh, oplRhythmHighHatPhase(o.rmXor(), hhNoise), 0)
 	}
 
 	o.advanceEnvelope(c, sd)
 	_ = o.advanceOperatorPhase(c, sd)
+	sdNoise := oplAdvanceNoiseN(o.noise, 16)
 	sdRaw := 0
 	if operatorHasSound(sd) {
-		sdRaw = o.sampleOperator(sd, oplRhythmSnarePhase(o.rmHHBit8, o.noise), 0)
+		sdRaw = o.sampleOperator(sd, oplRhythmSnarePhase(o.rmHHBit8, sdNoise), 0)
 	}
 
 	out := hhRaw + sdRaw
@@ -1053,7 +1055,6 @@ func (o *Synth) advanceOperatorPhase(c *impSynthChannelState, op *impSynthOperat
 	}
 	baseFreq := (fnum << c.block) >> 1
 	op.pgPhase += uint32((baseFreq * int(oplFrequencyMultiples[op.regMult])) >> 1)
-	o.advanceNoise()
 	return phase & oplWaveTableMask
 }
 
@@ -1372,6 +1373,7 @@ func (o *Synth) advanceChipState() {
 		o.egTimer++
 	}
 	o.egState ^= 1
+	o.noise = oplAdvanceNoiseN(o.noise, 36)
 }
 
 func (o *Synth) advanceNoise() {
@@ -1381,6 +1383,17 @@ func (o *Synth) advanceNoise() {
 	}
 	nBit := ((noise >> 14) ^ noise) & 0x01
 	o.noise = (noise >> 1) | (nBit << 22)
+}
+
+func oplAdvanceNoiseN(noise uint32, steps int) uint32 {
+	if noise == 0 {
+		noise = 1
+	}
+	for i := 0; i < steps; i++ {
+		nBit := ((noise >> 14) ^ noise) & 0x01
+		noise = (noise >> 1) | (nBit << 22)
+	}
+	return noise
 }
 
 func (o *Synth) syncChannelActive(ch int) {
