@@ -154,23 +154,45 @@ func analyzeCorpus(title, manifestPath, baseDir string, defaultTickRate, channel
 		TickRate: tickRate,
 		Songs:    make([]songMetric, 0, len(m.Songs)),
 	}
+	limit := runtime.NumCPU()
+	if limit < 1 {
+		limit = 1
+	}
+	swg := sizedwaitgroup.New(limit)
+	errCh := make(chan error, len(m.Songs))
+	var mu sync.Mutex
 	for _, song := range m.Songs {
-		label := strings.TrimSpace(song.Name)
-		if label == "" {
-			label = strings.TrimSpace(song.Lump)
-		}
-		path := filepath.Join(baseDir, song.File)
-		metric, err := analyzeSong(label, path, tickRate, channels, newSynth)
+		song := song
+		swg.Add()
+		go func() {
+			defer swg.Done()
+			label := strings.TrimSpace(song.Name)
+			if label == "" {
+				label = strings.TrimSpace(song.Lump)
+			}
+			path := filepath.Join(baseDir, song.File)
+			metric, err := analyzeSong(label, path, tickRate, channels, newSynth)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			mu.Lock()
+			out.Songs = append(out.Songs, metric)
+			finalizeCorpus(&out)
+			snapshot := cloneCorpus(out)
+			mu.Unlock()
+			if progress != nil {
+				if err := progress(snapshot); err != nil {
+					errCh <- err
+				}
+			}
+		}()
+	}
+	swg.Wait()
+	close(errCh)
+	for err := range errCh {
 		if err != nil {
 			return corpusMetric{}, err
-		}
-		out.Songs = append(out.Songs, metric)
-		finalizeCorpus(&out)
-		if progress != nil {
-			snapshot := cloneCorpus(out)
-			if err := progress(snapshot); err != nil {
-				return corpusMetric{}, err
-			}
 		}
 	}
 	finalizeCorpus(&out)
@@ -194,67 +216,42 @@ func analyzeSong(label, path string, tickRate, channels int, newSynth func(int) 
 		Channels: make([]channelMetric, 0, len(active)),
 		MinSpec:  1,
 	}
-	results := make([]channelMetric, 0, len(active))
-	var mu sync.Mutex
-	errCh := make(chan error, len(active))
-	limit := runtime.NumCPU()
-	if limit < 1 {
-		limit = 1
-	}
-	swg := sizedwaitgroup.New(limit)
 	for _, ch := range active {
-		swg.Add()
-		go func(ch int) {
-			defer swg.Done()
-			tmp, err := filterSeqForChannel(path, ch)
-			if err != nil {
-				errCh <- fmt.Errorf("filter %s ch%d: %w", label, ch, err)
-				return
-			}
-			defer os.Remove(tmp)
-			gotAll, err := renderImpSynthSeq(sampleRate, tickRate, windowStart+windowFrames, tmp, newSynth)
-			if err != nil {
-				errCh <- fmt.Errorf("render impsynth %s ch%d: %w", label, ch, err)
-				return
-			}
-			wantAll, err := renderNukedSeq(sampleRate, tickRate, windowStart+windowFrames, tmp)
-			if err != nil {
-				errCh <- fmt.Errorf("render nuked %s ch%d: %w", label, ch, err)
-				return
-			}
-			got := sliceStereoFrames(gotAll, windowStart, windowFrames)
-			want := sliceStereoFrames(wantAll, windowStart, windowFrames)
-			gotEnergy := monoAbsEnergy(got)
-			wantEnergy := monoAbsEnergy(want)
-			if gotEnergy == 0 && wantEnergy == 0 {
-				return
-			}
-			spec := spectrumCosineSimilarity(got, want, 512)
-			ratio := 0.0
-			if wantEnergy > 0 {
-				ratio = float64(gotEnergy) / float64(wantEnergy)
-			}
-			metric := channelMetric{
-				Channel:     ch,
-				Spec:        spec,
-				EnergyRatio: ratio,
-				MaxDelta:    maxPCMDelta(got, want),
-				GotEnergy:   gotEnergy,
-				WantEnergy:  wantEnergy,
-			}
-			mu.Lock()
-			results = append(results, metric)
-			mu.Unlock()
-		}(ch)
-	}
-	swg.Wait()
-	close(errCh)
-	for err := range errCh {
+		tmp, err := filterSeqForChannel(path, ch)
 		if err != nil {
-			return songMetric{}, err
+			return songMetric{}, fmt.Errorf("filter %s ch%d: %w", label, ch, err)
 		}
+		gotAll, err := renderImpSynthSeq(sampleRate, tickRate, windowStart+windowFrames, tmp, newSynth)
+		if err != nil {
+			_ = os.Remove(tmp)
+			return songMetric{}, fmt.Errorf("render impsynth %s ch%d: %w", label, ch, err)
+		}
+		wantAll, err := renderNukedSeq(sampleRate, tickRate, windowStart+windowFrames, tmp)
+		_ = os.Remove(tmp)
+		if err != nil {
+			return songMetric{}, fmt.Errorf("render nuked %s ch%d: %w", label, ch, err)
+		}
+		got := sliceStereoFrames(gotAll, windowStart, windowFrames)
+		want := sliceStereoFrames(wantAll, windowStart, windowFrames)
+		gotEnergy := monoAbsEnergy(got)
+		wantEnergy := monoAbsEnergy(want)
+		if gotEnergy == 0 && wantEnergy == 0 {
+			continue
+		}
+		spec := spectrumCosineSimilarity(got, want, 512)
+		ratio := 0.0
+		if wantEnergy > 0 {
+			ratio = float64(gotEnergy) / float64(wantEnergy)
+		}
+		out.Channels = append(out.Channels, channelMetric{
+			Channel:     ch,
+			Spec:        spec,
+			EnergyRatio: ratio,
+			MaxDelta:    maxPCMDelta(got, want),
+			GotEnergy:   gotEnergy,
+			WantEnergy:  wantEnergy,
+		})
 	}
-	out.Channels = results
 	for _, metric := range out.Channels {
 		out.MeanSpec += metric.Spec
 		if metric.Spec < out.MinSpec {
