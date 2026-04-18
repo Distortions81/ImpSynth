@@ -21,10 +21,11 @@ import (
 )
 
 const (
-	sampleRate   = 49716
-	windowFrames = 2048
-	wolfTickRate = 700
-	doomTickRate = 140
+	sampleRate      = 49716
+	windowFrames    = 2048
+	wolfTickRate    = 700
+	doomTickRate    = 140
+	minWindowEnergy = 64
 )
 
 type manifestSong struct {
@@ -235,7 +236,7 @@ func analyzeSong(label, path string, tickRate, channels int, newSynth func(int) 
 		want := sliceStereoFrames(wantAll, windowStart, windowFrames)
 		gotEnergy := monoAbsEnergy(got)
 		wantEnergy := monoAbsEnergy(want)
-		if gotEnergy == 0 && wantEnergy == 0 {
+		if gotEnergy < minWindowEnergy && wantEnergy < minWindowEnergy {
 			continue
 		}
 		spec := spectrumCosineSimilarity(got, want, 512)
