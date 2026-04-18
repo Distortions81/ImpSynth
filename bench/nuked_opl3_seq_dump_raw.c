@@ -97,6 +97,7 @@ int main(int argc, char **argv) {
 
     for (uint32_t frame = 0; frame < frames; frame++) {
         int16_t pcm[2];
+        size_t consumed_immediate = 0;
         while (frames_until_next == 0) {
             seq_event ev = events[event_index++];
             if (event_index >= event_count) {
@@ -107,6 +108,13 @@ int main(int argc, char **argv) {
             if (frames_until_next > 0) {
                 break;
             }
+            consumed_immediate++;
+            if (consumed_immediate >= event_count) {
+                break;
+            }
+        }
+        if (consumed_immediate >= event_count && frames_until_next == 0) {
+            frames_until_next = frames - frame;
         }
         OPL3_Generate(&chip, pcm);
         if (fwrite(pcm, sizeof(int16_t), 2, stdout) != 2) {

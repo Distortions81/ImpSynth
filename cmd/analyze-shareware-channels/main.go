@@ -485,6 +485,7 @@ func renderImpSynthSeq(sampleRate, tickRate, frames int, seqPath string, newSynt
 		tickFrames = 1
 	}
 	for remaining := frames; remaining > 0; {
+		consumedImmediate := 0
 		for framesUntilNext <= 0 {
 			ev := events[eventIndex]
 			eventIndex++
@@ -496,6 +497,15 @@ func renderImpSynthSeq(sampleRate, tickRate, frames int, seqPath string, newSynt
 			if framesUntilNext > 0 {
 				break
 			}
+			consumedImmediate++
+			if consumedImmediate >= len(events) {
+				// This filtered stream has no delayed events left to advance time.
+				// Keep the current chip state and render forward instead of looping forever.
+				break
+			}
+		}
+		if consumedImmediate >= len(events) && framesUntilNext <= 0 {
+			framesUntilNext = remaining
 		}
 		chunk := remaining
 		if framesUntilNext > 0 && chunk > framesUntilNext {
@@ -653,13 +663,43 @@ func filterSeqForChannel(src string, ch int) (string, error) {
 		return "", err
 	}
 	defer tmp.Close()
-	buf := make([]byte, 0, len(events)*5)
+	filtered := make([]seqEvent, 0, len(events))
+	pendingDelay := uint32(0)
 	for _, ev := range events {
 		if keepRegForChannel(ev.Reg, ch) {
-			buf = binary.LittleEndian.AppendUint16(buf, ev.Reg)
-			buf = append(buf, ev.Value)
-			buf = binary.LittleEndian.AppendUint16(buf, ev.Delay)
+			delay := uint32(ev.Delay)
+			if len(filtered) > 0 {
+				carried := pendingDelay
+				if carried > 0xffff {
+					carried = 0xffff
+				}
+				filtered[len(filtered)-1].Delay = uint16(carried)
+			}
+			filtered = append(filtered, seqEvent{
+				Reg:   ev.Reg,
+				Value: ev.Value,
+				Delay: uint16(delay),
+			})
+			pendingDelay = delay
+		} else {
+			pendingDelay += uint32(ev.Delay)
+			if pendingDelay > 0xffff {
+				pendingDelay = 0xffff
+			}
 		}
+	}
+	if len(filtered) > 0 {
+		carried := pendingDelay
+		if carried > 0xffff {
+			carried = 0xffff
+		}
+		filtered[len(filtered)-1].Delay = uint16(carried)
+	}
+	buf := make([]byte, 0, len(filtered)*5)
+	for _, ev := range filtered {
+		buf = binary.LittleEndian.AppendUint16(buf, ev.Reg)
+		buf = append(buf, ev.Value)
+		buf = binary.LittleEndian.AppendUint16(buf, ev.Delay)
 	}
 	if _, err := tmp.Write(buf); err != nil {
 		return "", err
