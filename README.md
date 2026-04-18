@@ -75,20 +75,25 @@ real-song snippets.
 
 Current findings:
 
-- `WONDERIN` and `ENDLEVEL` compare very closely to `Nuked-OPL3` on the tested
-  windows.
-- `GETTHEM` is the main weaker case in the shareware set.
-- That mismatch is not driven by rhythm mode. In the tested `GETTHEM` window,
-  rhythm mode never turns on.
-- The dominant divergence is a melodic channel issue, especially channel `1`.
-- Channel `1` in that song uses a high-feedback sine voice (`0xC1 = 0x0e`),
-  which points to feedback behavior as the main remaining OPL2 fidelity gap.
+- `02-untitled` previously had a clearly missing melodic lane on channel `2`.
+  That was a retrigger-state bug: silent non-sustaining notes could be dropped
+  while still in `sustain`, so later key-ons never restarted attack. The fix is
+  now covered by regression tests.
+- After that fix, the main weaker Wolf3D cases are again the shared melodic
+  `channel 1` family in `SUSPENSE`, `02-untitled`, `GETTHEM`, and `SEARCHN`.
+- That mismatch is not driven by rhythm mode. The remaining cluster points to
+  melodic FM behavior rather than missing percussion support.
+- The strongest remaining pattern is high-feedback melodic behavior on that
+  shared voice family, especially where songs switch to `0xC1 = 0x0e`.
+- `WONDERIN` and much of the DOOM shareware set remain very close to
+  `Nuked-OPL3`.
 
 Practical implication:
 
 - OPL2 playback is already close on several real shareware tracks.
-- The next place to improve is high-feedback melodic behavior rather than drum
-  mode for the current Wolf3D shareware coverage.
+- The major “missing instrument” retrigger failure is fixed.
+- The next place to improve is the shared high-feedback melodic `channel 1`
+  family rather than drum mode for the current Wolf3D shareware coverage.
 
 ## Example Program
 

@@ -1094,6 +1094,9 @@ func (o *Synth) keyOffChannel(ch int) {
 	o.ch[ch].fbPrev = [2]int16{}
 	for op := range o.ch[ch].ops {
 		o.ch[ch].ops[op].keyMask &^= oplKeyMaskNormal
+		if o.ch[ch].ops[op].egRout >= oplEnvelopeSilent {
+			o.ch[ch].ops[op].stage = oplEnvRelease
+		}
 	}
 	o.syncChannelActive(ch)
 }
@@ -1145,6 +1148,9 @@ func (o *Synth) setDrumKey(ch int, op int, on bool) {
 		o.ch[ch].ops[op].keyMask |= oplKeyMaskDrum
 	} else {
 		o.ch[ch].ops[op].keyMask &^= oplKeyMaskDrum
+		if o.ch[ch].ops[op].egRout >= oplEnvelopeSilent {
+			o.ch[ch].ops[op].stage = oplEnvRelease
+		}
 	}
 }
 

@@ -2,17 +2,18 @@
 
 This plan uses the current whole-song findings in [shareware-channel-findings.md](/home/dist/github/ImpSynth/docs/shareware-channel-findings.md:1) and orders work from worst mismatch to best.
 
-Important correction:
+Important corrections:
 - The earlier `SUSPENSE` ch `7` result was mostly a metric artifact caused by near-silent 1-LSB tail chunks.
-- After tightening the chunk gate, the real remaining top issue is a shared Wolf `channel 1` voice family.
+- `02-untitled` channel `2` was a real retrigger bug, but it is now fixed: silent key-off now forces an already-silent operator into `release`, so later key-ons restart attack correctly.
+- After that fix, the real remaining top issue is again the shared Wolf `channel 1` voice family.
 
 ## 1. Shared Wolf channel 1 voice family
 
 Highest-value targets:
 - `SUSPENSE` ch `1` spec `0.713`, ratio `0.992x`
-- `GETTHEM` ch `1` spec `0.725`, ratio `1.530x`
-- `SEARCHN` ch `1` spec `0.732`, ratio `1.536x`
-- `02-untitled` ch `1` spec `0.725`, ratio `1.551x`
+- `02-untitled` ch `1` spec `0.724`, ratio `1.549x`
+- `GETTHEM` ch `1` spec `0.726`, ratio `1.544x`
+- `SEARCHN` ch `1` spec `0.732`, ratio `1.547x`
 
 Why this is first:
 - This is one patch family showing up across several of the worst Wolf songs.
@@ -46,9 +47,9 @@ Expected likely causes:
 Highest-value targets:
 - `URAHERO` ch `6` spec `0.753`
 - `POW` ch `7` spec `0.753`
-- `ENDLEVEL` ch `2` spec `0.761`
 - `NAZI_NOR` ch `1` spec `0.764`
-- `23-untitled` ch `6` spec `0.788`
+- `ENDLEVEL` ch `7` spec `0.789`
+- `23-untitled` ch `6` spec `0.789`
 - `CORNER` ch `6` spec `0.804`
 
 Why this is first:
@@ -70,13 +71,11 @@ Expected likely causes:
 ## 3. Wolf3D channels with large level mismatch
 
 Highest-value targets:
-- `GETTHEM` ch `1` energy `1.530x`
-- `SEARCHN` ch `1` energy `1.536x`
-- `02-untitled` ch `1` energy `1.551x`
-- `GETTHEM` ch `2` energy `1.603x`
-- `SUSPENSE` ch `2` energy `1.633x`
-- `SUSPENSE` ch `3` energy `1.250x`
-- `ENDLEVEL` ch `2` energy `0.559x`
+- `02-untitled` ch `1` energy `1.549x`
+- `GETTHEM` ch `1` energy `1.544x`
+- `SEARCHN` ch `1` energy `1.547x`
+- `GETTHEM` ch `2` energy `1.591x`
+- `SUSPENSE` ch `2` energy `1.619x`
 
 Why this is next:
 - These overlap heavily with the shared channel-1 family above.
@@ -99,12 +98,12 @@ Expected likely causes:
 ## 4. Wolf3D channels with huge max-delta spikes
 
 Highest-value targets:
-- `02-untitled` ch `2` max delta `8159`
+- `02-untitled` ch `1` max delta `3742`
 - `02-untitled` ch `3` max delta `8159`
-- `02-untitled` ch `5` max delta `8159`
 - `02-untitled` ch `7` max delta `7432`
-- `SEARCHN` ch `1` max delta `4069`
-- `GETTHEM` ch `1` max delta `2878`
+- `SEARCHN` ch `1` max delta `4057`
+- `GETTHEM` ch `1` max delta `2874`
+- `SUSPENSE` ch `4` max delta `2429`
 
 Why this matters:
 - These often indicate clipping, phase inversion regions, or abrupt state differences.
@@ -120,11 +119,11 @@ Plan:
 ## 5. DOOM short intro outliers
 
 Highest-value targets:
-- `D_INTROA` ch `2` spec `0.253`
-- `D_INTROA` ch `17` spec `0.275`
-- `D_INTROA` ch `1` spec `0.331`
-- `D_INTROA` ch `16` spec `0.359`
-- `D_INTRO` ch `10` spec `0.605`
+- `D_INTRO` ch `14` spec `0.830`
+- `D_INTROA` ch `16` spec `0.840`
+- `D_INTROA` ch `1` spec `0.844`
+- `D_INTRO` ch `0` spec `0.846`
+- `D_INTRO` ch `10` spec `0.859`
 
 Why this is after Wolf:
 - DOOM overall is already much closer than the worst Wolf songs.
@@ -139,10 +138,10 @@ Plan:
 ## 6. DOOM broad “good but not perfect” long-song quality
 
 Representative tracks:
-- `D_INTER` mean spec `0.707`
-- `D_E1M1` mean spec `0.791`
-- `D_E1M9` mean spec `0.807`
-- `D_E1M4` mean spec `0.839`
+- `D_E1M1` mean spec `0.925`
+- `D_INTER` mean spec `0.943`
+- `D_E1M4` mean spec `0.947`
+- `D_E1M9` mean spec `0.948`
 
 Why this is later:
 - These tracks are not catastrophically wrong.
@@ -172,18 +171,19 @@ Plan:
 
 ## Recommended work order
 
-1. `SUSPENSE` ch `7`
-2. `GETTHEM` ch `1`
-3. `SEARCHN` ch `1`
-4. `02-untitled` ch `1`
+1. `SUSPENSE` ch `1`
+2. `02-untitled` ch `1`
+3. `GETTHEM` ch `1`
+4. `SEARCHN` ch `1`
 5. `URAHERO` ch `6`
-6. `ENDLEVEL` ch `2`
-7. `D_INTROA` ch `2`
-8. `D_INTRO` ch `10`
+6. `POW` ch `7`
+7. `D_INTRO` ch `14`
+8. `D_INTROA` ch `16`
 
 ## Success criteria
 
 - Raise the shared Wolf channel-1 family into the `0.85+` range.
-- Bring major Wolf energy outliers closer to `1.0x`, especially `GETTHEM`, `SEARCHN`, and `02-untitled`.
-- Raise `D_INTROA` out of the `0.25-0.35` range.
+- Keep `02-untitled` channel `2` out of the “missing instrument” regime; it should stay near `1.0x` energy instead of collapsing toward silence.
+- Bring major Wolf energy outliers closer to `1.0x`, especially `GETTHEM`, `SEARCHN`, and `02-untitled` channel `1`.
+- Lift the short DOOM intro outliers into the `0.9+` range.
 - Re-run the full whole-song report after each fix batch and reorder this plan based on the new worst channels.

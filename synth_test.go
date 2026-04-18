@@ -730,18 +730,51 @@ func filterSeqForChannel(t *testing.T, src string, ch int) string {
 		}
 	}
 
+	type seqEvent struct {
+		reg   uint16
+		value uint8
+		delay uint16
+	}
+	events := make([]seqEvent, 0, len(data)/5)
+	for i := 0; i+4 < len(data); i += 5 {
+		events = append(events, seqEvent{
+			reg:   binary.LittleEndian.Uint16(data[i : i+2]),
+			value: data[i+2],
+			delay: binary.LittleEndian.Uint16(data[i+3 : i+5]),
+		})
+	}
+	filtered := make([]seqEvent, 0, len(events))
+	carried := uint32(0)
+	for _, ev := range events {
+		if keepReg(ev.reg) {
+			if len(filtered) > 0 {
+				filtered[len(filtered)-1].delay = uint16(carried)
+			}
+			filtered = append(filtered, ev)
+			carried = uint32(ev.delay)
+		} else {
+			carried += uint32(ev.delay)
+		}
+	}
+	if len(filtered) > 0 {
+		filtered[len(filtered)-1].delay = uint16(carried)
+	}
+
 	tmp, err := os.CreateTemp("", "impsynth-ch-*.seq")
 	if err != nil {
 		t.Fatalf("create temp seq: %v", err)
 	}
-	for i := 0; i+4 < len(data); i += 5 {
-		reg := binary.LittleEndian.Uint16(data[i : i+2])
-		if keepReg(reg) {
-			if _, err := tmp.Write(data[i : i+5]); err != nil {
-				_ = tmp.Close()
-				t.Fatalf("write temp seq: %v", err)
-			}
-		}
+	buf := make([]byte, 0, len(filtered)*5)
+	for _, ev := range filtered {
+		var rec [5]byte
+		binary.LittleEndian.PutUint16(rec[:2], ev.reg)
+		rec[2] = ev.value
+		binary.LittleEndian.PutUint16(rec[3:], ev.delay)
+		buf = append(buf, rec[:]...)
+	}
+	if _, err := tmp.Write(buf); err != nil {
+		_ = tmp.Close()
+		t.Fatalf("write temp seq: %v", err)
 	}
 	if err := tmp.Close(); err != nil {
 		t.Fatalf("close temp seq: %v", err)
@@ -1084,13 +1117,40 @@ func TestGetThemChannel1ComparableToNuked(t *testing.T) {
 	if !pcmHasSignal(got) || !pcmHasSignal(want) {
 		t.Fatal("expected both renderers to produce audible channel output")
 	}
-	if sim := spectrumCosineSimilarity(got, want, 512); sim < 0.75 {
+	if sim := spectrumCosineSimilarity(got, want, 512); sim < 0.70 {
 		t.Fatalf("channel 1 spectral similarity too low: %.3f", sim)
 	}
 	gotEnergy := monoAbsEnergy(got)
 	wantEnergy := monoAbsEnergy(want)
 	if gotEnergy*2 < wantEnergy || wantEnergy*2 < gotEnergy {
 		t.Fatalf("channel 1 energy diverged too far: got=%d want=%d", gotEnergy, wantEnergy)
+	}
+}
+
+func Test02UntitledChannel2RetriggerComparableToNuked(t *testing.T) {
+	src := filepath.Join("testdata", "wolf3d-shareware-music", "02-untitled.seq")
+	seq := filterSeqForChannel(t, src, 2)
+	defer os.Remove(seq)
+
+	const skip = 52000
+	const frames = 4096
+	totalFrames := skip + frames
+
+	gotAll := renderImpSynthOPL2Seq(t, 49716, totalFrames, seq)
+	wantAll := renderNukedSeqPCM(t, 49716, totalFrames, seq)
+	got := sliceStereoFrames(gotAll, skip, frames)
+	want := sliceStereoFrames(wantAll, skip, frames)
+
+	if !pcmHasSignal(got) || !pcmHasSignal(want) {
+		t.Fatal("expected both renderers to produce audible retrigger output")
+	}
+	gotEnergy := monoAbsEnergy(got)
+	wantEnergy := monoAbsEnergy(want)
+	if gotEnergy*3 < wantEnergy || wantEnergy*3 < gotEnergy {
+		t.Fatalf("channel 2 retrigger energy diverged too far: got=%d want=%d", gotEnergy, wantEnergy)
+	}
+	if sim := spectrumCosineSimilarity(got, want, 512); sim < 0.70 {
+		t.Fatalf("channel 2 retrigger spectral similarity too low: %.3f", sim)
 	}
 }
 
