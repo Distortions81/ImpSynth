@@ -39,6 +39,8 @@ const (
 	oplOperatorOutputScale                 = 4096.0
 	oplPhaseModScale                       = 2032.0
 	oplFeedbackPhaseScaleRatio             = 4.0
+	oplKeyMaskNormal                       = 1 << 0
+	oplKeyMaskDrum                         = 1 << 1
 	oplEnvOff                  oplEnvStage = iota
 	oplEnvAttack
 	oplEnvDecay
@@ -127,6 +129,7 @@ const (
 type impSynthOperatorState struct {
 	pgPhase    uint32
 	phaseReset bool
+	keyMask    uint8
 	egRout     uint16
 	egOut      uint16
 	egBase     uint16
@@ -157,7 +160,7 @@ type impSynthChannelState struct {
 	panL     int32
 	panR     int32
 	feedback uint8
-	fbPrev   [2]int
+	fbPrev   [2]int16
 	ops      [opl3OperatorCount]impSynthOperatorState
 }
 
@@ -166,6 +169,7 @@ type impSynthChannelState struct {
 // and DMX-style register writes.
 type Synth struct {
 	sampleRate       int
+	opl2Mode         bool
 	resampleStep     uint64
 	resamplePhase    uint64
 	resamplePrimed   bool
@@ -177,6 +181,8 @@ type Synth struct {
 	ch               [opl3ChannelCount]impSynthChannelState
 	waveformSelectOn bool
 	stereoExt        bool
+	rhythmMode       bool
+	rhythmBits       uint8
 	noteSelect       uint8
 	tremoloShift     uint8
 	vibShift         uint8
@@ -188,6 +194,13 @@ type Synth struct {
 	egState          uint8
 	egAdd            uint8
 	egTimerLo        uint8
+	noise            uint32
+	rmHHBit2         uint8
+	rmHHBit3         uint8
+	rmHHBit7         uint8
+	rmHHBit8         uint8
+	rmTCBit3         uint8
+	rmTCBit5         uint8
 	activeMask       uint32
 	stereoBuf        []int16
 	monoBuf          []byte
@@ -213,6 +226,14 @@ func New(sampleRate int) *Synth {
 	return o
 }
 
+// NewOPL2 creates a synth constrained to AdLib/OPL2-compatible behavior.
+func NewOPL2(sampleRate int) *Synth {
+	o := New(sampleRate)
+	o.opl2Mode = true
+	o.Reset()
+	return o
+}
+
 // Reset clears all registers and runtime state.
 func (o *Synth) Reset() {
 	if o == nil {
@@ -222,6 +243,8 @@ func (o *Synth) Reset() {
 	o.ch = [opl3ChannelCount]impSynthChannelState{}
 	o.waveformSelectOn = false
 	o.stereoExt = false
+	o.rhythmMode = false
+	o.rhythmBits = 0
 	o.noteSelect = 0
 	o.tremoloShift = 4
 	o.vibShift = 1
@@ -233,6 +256,13 @@ func (o *Synth) Reset() {
 	o.egState = 0
 	o.egAdd = 0
 	o.egTimerLo = 0
+	o.noise = 1
+	o.rmHHBit2 = 0
+	o.rmHHBit3 = 0
+	o.rmHHBit7 = 0
+	o.rmHHBit8 = 0
+	o.rmTCBit3 = 0
+	o.rmTCBit5 = 0
 	o.activeMask = 0
 	o.resamplePhase = 0
 	o.resamplePrimed = false
@@ -257,6 +287,14 @@ func (o *Synth) Reset() {
 func (o *Synth) WriteReg(addr uint16, value uint8) {
 	if o == nil {
 		return
+	}
+	if o.opl2Mode {
+		if addr >= 0x100 {
+			return
+		}
+		if addr >= 0xD0 && addr <= 0xD8 {
+			return
+		}
 	}
 	a := int(addr & 0x1FF)
 	o.regs[a] = value
@@ -284,6 +322,7 @@ func (o *Synth) WriteReg(addr uint16, value uint8) {
 	case 0xBD:
 		o.tremoloShift = (((value >> 7) ^ 1) << 1) + 2
 		o.vibShift = ((value >> 6) & 0x01) ^ 1
+		o.updateRhythm(value)
 		return
 	}
 
@@ -394,7 +433,15 @@ func (o *Synth) renderChipSample() (int32, int32) {
 	var l, r int32
 	for active := o.activeMask; active != 0; active &= active - 1 {
 		ch := bits.TrailingZeros32(active)
+		if o.rhythmMode && ch >= 6 && ch <= 8 {
+			continue
+		}
 		sl, sr := o.renderChannel(ch)
+		l += sl
+		r += sr
+	}
+	if o.rhythmMode {
+		sl, sr := o.renderRhythmChannels()
 		l += sl
 		r += sr
 	}
@@ -436,8 +483,8 @@ func (o *Synth) renderChannel(ch int) (int32, int32) {
 		return 0, 0
 	}
 	c := &o.ch[ch]
-	if !c.keyOn && c.ops[0].egRout >= oplEnvelopeSilent && c.ops[1].egRout >= oplEnvelopeSilent {
-		o.activeMask &^= 1 << uint(ch)
+	if !channelHasActiveOperators(c) {
+		o.syncChannelActive(ch)
 		return 0, 0
 	}
 	switch c.render {
@@ -489,21 +536,145 @@ func (o *Synth) renderChannel(ch int) (int32, int32) {
 		modFB = oplFeedbackPhaseOffset(c.fbPrev[0], c.fbPrev[1], c.feedback)
 	}
 	modRaw := o.sampleOperator(mod, modPhase, modFB)
+	modOut := int(feedbackSample(modRaw))
 	c.fbPrev[1] = c.fbPrev[0]
-	c.fbPrev[0] = modRaw
+	c.fbPrev[0] = int16(modOut)
 
 	o.advanceEnvelope(c, car)
 	carPhase := o.advanceOperatorPhase(c, car)
 	carMod := 0
 	if !c.additive {
-		carMod = modRaw
+		carMod = modOut
 	}
 	carRaw := o.sampleOperator(car, carPhase, carMod)
 
 	out := carRaw
 	if c.additive {
-		out += modRaw
+		out += modOut
 	}
+	return applyPanGain(out, c.panL), applyPanGain(out, c.panR)
+}
+
+func (o *Synth) renderRhythmChannels() (int32, int32) {
+	var l, r int32
+	for ch := 6; ch <= 8; ch++ {
+		if (o.activeMask & (1 << uint(ch))) == 0 {
+			continue
+		}
+		if !channelHasActiveOperators(&o.ch[ch]) {
+			o.syncChannelActive(ch)
+			continue
+		}
+	}
+
+	l6, r6 := o.renderRhythmBassDrum()
+	l += l6
+	r += r6
+	l7, r7 := o.renderRhythmHighHatSnare()
+	l += l7
+	r += r7
+	l8, r8 := o.renderRhythmTomCymbal()
+	l += l8
+	r += r8
+	return l, r
+}
+
+func (o *Synth) renderRhythmBassDrum() (int32, int32) {
+	c := &o.ch[6]
+	mod := &c.ops[0]
+	car := &c.ops[1]
+	if !operatorHasSound(mod) && !operatorHasSound(car) {
+		o.syncChannelActive(6)
+		return 0, 0
+	}
+
+	o.advanceEnvelope(c, mod)
+	modPhase := o.advanceOperatorPhase(c, mod)
+	modFB := 0
+	if c.feedback != 0 {
+		modFB = oplFeedbackPhaseOffset(c.fbPrev[0], c.fbPrev[1], c.feedback)
+	}
+	modRaw := 0
+	if operatorHasSound(mod) {
+		modRaw = o.sampleOperator(mod, modPhase, modFB)
+	}
+	modOut := int(feedbackSample(modRaw))
+	c.fbPrev[1] = c.fbPrev[0]
+	c.fbPrev[0] = int16(modOut)
+
+	o.advanceEnvelope(c, car)
+	carPhase := o.advanceOperatorPhase(c, car)
+	carMod := 0
+	if !c.additive {
+		carMod = modOut
+	}
+	carRaw := 0
+	if operatorHasSound(car) {
+		carRaw = o.sampleOperator(car, carPhase, carMod)
+	}
+
+	return applyPanGain(carRaw, c.panL), applyPanGain(carRaw, c.panR)
+}
+
+func (o *Synth) renderRhythmHighHatSnare() (int32, int32) {
+	c := &o.ch[7]
+	hh := &c.ops[0]
+	sd := &c.ops[1]
+	if !operatorHasSound(hh) && !operatorHasSound(sd) {
+		o.syncChannelActive(7)
+		return 0, 0
+	}
+
+	o.advanceEnvelope(c, hh)
+	hhPhase := o.advanceOperatorPhase(c, hh)
+	o.rmHHBit2 = uint8((hhPhase >> 2) & 1)
+	o.rmHHBit3 = uint8((hhPhase >> 3) & 1)
+	o.rmHHBit7 = uint8((hhPhase >> 7) & 1)
+	o.rmHHBit8 = uint8((hhPhase >> 8) & 1)
+	hhNoise := oplAdvanceNoiseN(o.noise, 13)
+	hhRaw := 0
+	if operatorHasSound(hh) {
+		hhRaw = o.sampleOperator(hh, oplRhythmHighHatPhase(o.rmXor(), hhNoise), 0)
+	}
+
+	o.advanceEnvelope(c, sd)
+	_ = o.advanceOperatorPhase(c, sd)
+	sdNoise := oplAdvanceNoiseN(o.noise, 16)
+	sdRaw := 0
+	if operatorHasSound(sd) {
+		sdRaw = o.sampleOperator(sd, oplRhythmSnarePhase(o.rmHHBit8, sdNoise), 0)
+	}
+
+	out := hhRaw + sdRaw
+	return applyPanGain(out, c.panL), applyPanGain(out, c.panR)
+}
+
+func (o *Synth) renderRhythmTomCymbal() (int32, int32) {
+	c := &o.ch[8]
+	tom := &c.ops[0]
+	tc := &c.ops[1]
+	if !operatorHasSound(tom) && !operatorHasSound(tc) {
+		o.syncChannelActive(8)
+		return 0, 0
+	}
+
+	o.advanceEnvelope(c, tom)
+	tomPhase := o.advanceOperatorPhase(c, tom)
+	tomRaw := 0
+	if operatorHasSound(tom) {
+		tomRaw = o.sampleOperator(tom, tomPhase, 0)
+	}
+
+	o.advanceEnvelope(c, tc)
+	tcPhase := o.advanceOperatorPhase(c, tc)
+	o.rmTCBit3 = uint8((tcPhase >> 3) & 1)
+	o.rmTCBit5 = uint8((tcPhase >> 5) & 1)
+	tcRaw := 0
+	if operatorHasSound(tc) {
+		tcRaw = o.sampleOperator(tc, oplRhythmTopCymbalPhase(o.rmXor()), 0)
+	}
+
+	out := tomRaw + tcRaw
 	return applyPanGain(out, c.panL), applyPanGain(out, c.panR)
 }
 
@@ -514,12 +685,13 @@ func (o *Synth) renderChannelCommonWave0Raw(c *impSynthChannelState) int32 {
 	o.advanceEnvelope(c, mod)
 	modPhase := o.advanceOperatorPhase(c, mod)
 	modRaw := sampleOperatorWave0(mod, modPhase, 0)
+	modOut := int(feedbackSample(modRaw))
 	c.fbPrev[1] = c.fbPrev[0]
-	c.fbPrev[0] = modRaw
+	c.fbPrev[0] = int16(modOut)
 
 	o.advanceEnvelope(c, car)
 	carPhase := o.advanceOperatorPhase(c, car)
-	carRaw := sampleOperatorWave0(car, carPhase, modRaw)
+	carRaw := sampleOperatorWave0(car, carPhase, modOut)
 
 	return int32(carRaw)
 }
@@ -531,10 +703,11 @@ func (o *Synth) renderChannelWave0FMStaticRaw(c *impSynthChannelState) int32 {
 	o.advanceEnvelopeNoTrem(c, mod)
 	modPhase := advanceOperatorPhaseNoVib(c, mod)
 	modRaw := sampleOperatorWave0(mod, modPhase, 0)
+	modOut := int(feedbackSample(modRaw))
 
 	o.advanceEnvelopeNoTrem(c, car)
 	carPhase := advanceOperatorPhaseNoVib(c, car)
-	carRaw := sampleOperatorWave0(car, carPhase, modRaw)
+	carRaw := sampleOperatorWave0(car, carPhase, modOut)
 
 	return int32(carRaw)
 }
@@ -547,12 +720,13 @@ func (o *Synth) renderChannelWave0FeedbackRaw(c *impSynthChannelState) int32 {
 	modPhase := o.advanceOperatorPhase(c, mod)
 	modFB := oplFeedbackPhaseOffset(c.fbPrev[0], c.fbPrev[1], c.feedback)
 	modRaw := sampleOperatorWave0(mod, modPhase, modFB)
+	modOut := int(feedbackSample(modRaw))
 	c.fbPrev[1] = c.fbPrev[0]
-	c.fbPrev[0] = modRaw
+	c.fbPrev[0] = int16(modOut)
 
 	o.advanceEnvelope(c, car)
 	carPhase := o.advanceOperatorPhase(c, car)
-	carRaw := sampleOperatorWave0(car, carPhase, modRaw)
+	carRaw := sampleOperatorWave0(car, carPhase, modOut)
 
 	return int32(carRaw)
 }
@@ -565,12 +739,13 @@ func (o *Synth) renderChannelWave0FeedbackStaticRaw(c *impSynthChannelState) int
 	modPhase := advanceOperatorPhaseNoVib(c, mod)
 	modFB := oplFeedbackPhaseOffset(c.fbPrev[0], c.fbPrev[1], c.feedback)
 	modRaw := sampleOperatorWave0(mod, modPhase, modFB)
+	modOut := int(feedbackSample(modRaw))
 	c.fbPrev[1] = c.fbPrev[0]
-	c.fbPrev[0] = modRaw
+	c.fbPrev[0] = int16(modOut)
 
 	o.advanceEnvelopeNoTrem(c, car)
 	carPhase := advanceOperatorPhaseNoVib(c, car)
-	carRaw := sampleOperatorWave0(car, carPhase, modRaw)
+	carRaw := sampleOperatorWave0(car, carPhase, modOut)
 
 	return int32(carRaw)
 }
@@ -582,14 +757,15 @@ func (o *Synth) renderChannelWave0AdditiveRaw(c *impSynthChannelState) int32 {
 	o.advanceEnvelope(c, mod)
 	modPhase := o.advanceOperatorPhase(c, mod)
 	modRaw := sampleOperatorWave0(mod, modPhase, 0)
+	modOut := int(feedbackSample(modRaw))
 	c.fbPrev[1] = c.fbPrev[0]
-	c.fbPrev[0] = modRaw
+	c.fbPrev[0] = int16(modOut)
 
 	o.advanceEnvelope(c, car)
 	carPhase := o.advanceOperatorPhase(c, car)
 	carRaw := sampleOperatorWave0(car, carPhase, 0)
 
-	return int32(carRaw + modRaw)
+	return int32(carRaw + modOut)
 }
 
 func (o *Synth) renderChannelWave0AdditiveStaticRaw(c *impSynthChannelState) int32 {
@@ -599,12 +775,13 @@ func (o *Synth) renderChannelWave0AdditiveStaticRaw(c *impSynthChannelState) int
 	o.advanceEnvelopeNoTrem(c, mod)
 	modPhase := advanceOperatorPhaseNoVib(c, mod)
 	modRaw := sampleOperatorWave0(mod, modPhase, 0)
+	modOut := int(feedbackSample(modRaw))
 
 	o.advanceEnvelopeNoTrem(c, car)
 	carPhase := advanceOperatorPhaseNoVib(c, car)
 	carRaw := sampleOperatorWave0(car, carPhase, 0)
 
-	return int32(carRaw + modRaw)
+	return int32(carRaw + modOut)
 }
 
 func stereoSample(v int32) (int32, int32) { return v, v }
@@ -705,7 +882,8 @@ func (o *Synth) advanceEnvelope(c *impSynthChannelState, op *impSynthOperatorSta
 	baseAtten := int(op.egRout) + int(op.regTL<<2) + int(op.egKSL>>oplKSLShift[op.regKSL]) + trem
 	op.egOut = uint16(clampAtten(baseAtten))
 
-	reset := c.keyOn && op.stage == oplEnvRelease
+	keyOn := operatorKeyOn(op)
+	reset := keyOn && op.stage == oplEnvRelease
 	regRate := uint8(0)
 	if reset {
 		regRate = op.regAR
@@ -753,7 +931,7 @@ func (o *Synth) advanceEnvelope(c *impSynthChannelState, op *impSynthOperatorSta
 	case oplEnvAttack:
 		if op.egRout == 0 {
 			op.stage = oplEnvDecay
-		} else if c.keyOn && shift > 0 && rateHi != 0x0f {
+		} else if keyOn && shift > 0 && rateHi != 0x0f {
 			// Match the chip's 9-bit attack wraparound instead of masking the
 			// complement first. Masking first leaves a fully silent operator
 			// stuck at 0x1ff for medium attack rates.
@@ -775,7 +953,7 @@ func (o *Synth) advanceEnvelope(c *impSynthChannelState, op *impSynthOperatorSta
 	if reset {
 		op.stage = oplEnvAttack
 	}
-	if !c.keyOn {
+	if !keyOn {
 		op.stage = oplEnvRelease
 	}
 }
@@ -784,7 +962,8 @@ func (o *Synth) advanceEnvelopeNoTrem(c *impSynthChannelState, op *impSynthOpera
 	baseAtten := int(op.egRout) + int(op.egBase)
 	op.egOut = uint16(clampAtten(baseAtten))
 
-	reset := c.keyOn && op.stage == oplEnvRelease
+	keyOn := operatorKeyOn(op)
+	reset := keyOn && op.stage == oplEnvRelease
 	regRate := uint8(0)
 	if reset {
 		regRate = op.regAR
@@ -832,7 +1011,7 @@ func (o *Synth) advanceEnvelopeNoTrem(c *impSynthChannelState, op *impSynthOpera
 	case oplEnvAttack:
 		if op.egRout == 0 {
 			op.stage = oplEnvDecay
-		} else if c.keyOn && shift > 0 && rateHi != 0x0f {
+		} else if keyOn && shift > 0 && rateHi != 0x0f {
 			egInc = int(^op.egRout) >> uint(4-shift)
 		}
 	case oplEnvDecay:
@@ -851,7 +1030,7 @@ func (o *Synth) advanceEnvelopeNoTrem(c *impSynthChannelState, op *impSynthOpera
 	if reset {
 		op.stage = oplEnvAttack
 	}
-	if !c.keyOn {
+	if !keyOn {
 		op.stage = oplEnvRelease
 	}
 }
@@ -863,7 +1042,6 @@ func (o *Synth) advanceOperatorPhase(c *impSynthChannelState, op *impSynthOperat
 	phase := int(uint16(op.pgPhase >> oplPhaseFracBits))
 	if op.phaseReset {
 		op.pgPhase = 0
-		phase = 0
 		op.phaseReset = false
 	}
 
@@ -891,7 +1069,6 @@ func advanceOperatorPhaseNoVib(c *impSynthChannelState, op *impSynthOperatorStat
 	phase := int(uint16(op.pgPhase >> oplPhaseFracBits))
 	if op.phaseReset {
 		op.pgPhase = 0
-		phase = 0
 		op.phaseReset = false
 	}
 	baseFreq := (int(c.fnum) << c.block) >> 1
@@ -903,17 +1080,77 @@ func (o *Synth) keyOnChannel(ch int) {
 	if ch < 0 || ch >= len(o.ch) {
 		return
 	}
-	o.activeMask |= 1 << uint(ch)
-	o.ch[ch].fbPrev = [2]int{}
+	o.ch[ch].fbPrev = [2]int16{}
+	for op := range o.ch[ch].ops {
+		o.ch[ch].ops[op].keyMask |= oplKeyMaskNormal
+	}
+	o.syncChannelActive(ch)
 }
 
 func (o *Synth) keyOffChannel(ch int) {
 	if ch < 0 || ch >= len(o.ch) {
 		return
 	}
-	o.ch[ch].fbPrev = [2]int{}
+	o.ch[ch].fbPrev = [2]int16{}
 	for op := range o.ch[ch].ops {
-		o.ch[ch].ops[op].stage = oplEnvRelease
+		o.ch[ch].ops[op].keyMask &^= oplKeyMaskNormal
+		if o.ch[ch].ops[op].egRout >= oplEnvelopeSilent {
+			o.ch[ch].ops[op].stage = oplEnvRelease
+		}
+	}
+	o.syncChannelActive(ch)
+}
+
+func (o *Synth) updateRhythm(value uint8) {
+	prevMode := o.rhythmMode
+	prevBits := o.rhythmBits
+	o.rhythmMode = (value & 0x20) != 0
+	o.rhythmBits = value & 0x1F
+
+	if !o.rhythmMode {
+		for _, drum := range []struct{ ch, op int }{
+			{6, 0}, {6, 1},
+			{7, 0}, {7, 1},
+			{8, 0}, {8, 1},
+		} {
+			o.setDrumKey(drum.ch, drum.op, false)
+		}
+		for ch := 6; ch <= 8; ch++ {
+			o.syncChannelActive(ch)
+		}
+		return
+	}
+	if !prevMode {
+		for ch := 6; ch <= 8; ch++ {
+			o.ch[ch].fbPrev = [2]int16{}
+		}
+	}
+	o.setDrumKey(7, 0, (o.rhythmBits&0x01) != 0)
+	o.setDrumKey(8, 1, (o.rhythmBits&0x02) != 0)
+	o.setDrumKey(8, 0, (o.rhythmBits&0x04) != 0)
+	o.setDrumKey(7, 1, (o.rhythmBits&0x08) != 0)
+	o.setDrumKey(6, 0, (o.rhythmBits&0x10) != 0)
+	o.setDrumKey(6, 1, (o.rhythmBits&0x10) != 0)
+
+	if prevMode && prevBits == o.rhythmBits {
+		return
+	}
+	for ch := 6; ch <= 8; ch++ {
+		o.syncChannelActive(ch)
+	}
+}
+
+func (o *Synth) setDrumKey(ch int, op int, on bool) {
+	if ch < 0 || ch >= len(o.ch) || op < 0 || op >= len(o.ch[ch].ops) {
+		return
+	}
+	if on {
+		o.ch[ch].ops[op].keyMask |= oplKeyMaskDrum
+	} else {
+		o.ch[ch].ops[op].keyMask &^= oplKeyMaskDrum
+		if o.ch[ch].ops[op].egRout >= oplEnvelopeSilent {
+			o.ch[ch].ops[op].stage = oplEnvRelease
+		}
 	}
 }
 
@@ -940,6 +1177,11 @@ func (o *Synth) refreshChannelControl(ch int) {
 	c0 := o.regs[base+0xC0+ci]
 	o.ch[ch].additive = (c0 & 0x01) != 0
 	o.ch[ch].feedback = (c0 >> 1) & 0x07
+	if o.opl2Mode {
+		o.ch[ch].panL, o.ch[ch].panR = oplPanGainUnit, oplPanGainUnit
+		o.updateRenderMode(ch)
+		return
+	}
 	left := (c0 & 0x10) != 0
 	right := (c0 & 0x20) != 0
 	if o.stereoExt {
@@ -1000,7 +1242,13 @@ func (o *Synth) refreshOperator(ch int, op int) {
 	}
 	s.regRR = reg80 & 0x0F
 	s.regWave = regE0 & 0x07
-	if !o.waveformSelectOn {
+	if o.opl2Mode {
+		if !o.waveformSelectOn {
+			s.regWave = 0
+		} else {
+			s.regWave &= 0x03
+		}
+	} else if !o.waveformSelectOn {
 		s.regWave &= 0x03
 	}
 	o.updateOperatorKSL(ch, op)
@@ -1013,6 +1261,9 @@ func (o *Synth) updateRenderMode(ch int) {
 	}
 	c := &o.ch[ch]
 	c.render = oplRenderModeGeneric
+	if o.opl2Mode && c.feedback != 0 {
+		return
+	}
 	if o.stereoExt || c.ops[0].regWave != 0 || c.ops[1].regWave != 0 {
 		return
 	}
@@ -1135,6 +1386,38 @@ func (o *Synth) advanceChipState() {
 		o.egTimer++
 	}
 	o.egState ^= 1
+	o.noise = oplAdvanceNoiseN(o.noise, 36)
+}
+
+func (o *Synth) advanceNoise() {
+	noise := o.noise
+	if noise == 0 {
+		noise = 1
+	}
+	nBit := ((noise >> 14) ^ noise) & 0x01
+	o.noise = (noise >> 1) | (nBit << 22)
+}
+
+func oplAdvanceNoiseN(noise uint32, steps int) uint32 {
+	if noise == 0 {
+		noise = 1
+	}
+	for i := 0; i < steps; i++ {
+		nBit := ((noise >> 14) ^ noise) & 0x01
+		noise = (noise >> 1) | (nBit << 22)
+	}
+	return noise
+}
+
+func (o *Synth) syncChannelActive(ch int) {
+	if ch < 0 || ch >= len(o.ch) {
+		return
+	}
+	if channelHasActiveOperators(&o.ch[ch]) {
+		o.activeMask |= 1 << uint(ch)
+		return
+	}
+	o.activeMask &^= 1 << uint(ch)
 }
 
 func decodeOperatorSlot(bank int, slot int) (ch int, op int, ok bool) {
@@ -1147,6 +1430,46 @@ func decodeOperatorSlot(bank int, slot int) (ch int, op int, ok bool) {
 		return 0, 0, false
 	}
 	return bank*9 + localCh, localOp, true
+}
+
+func operatorKeyOn(op *impSynthOperatorState) bool {
+	return op != nil && op.keyMask != 0
+}
+
+func operatorHasSound(op *impSynthOperatorState) bool {
+	return op != nil && (op.keyMask != 0 || op.egRout < oplEnvelopeSilent)
+}
+
+func channelHasActiveOperators(c *impSynthChannelState) bool {
+	if c == nil {
+		return false
+	}
+	return operatorHasSound(&c.ops[0]) || operatorHasSound(&c.ops[1])
+}
+
+func oplRhythmHighHatPhase(rmXor uint8, noise uint32) int {
+	phase := int(rmXor) << 9
+	if (rmXor ^ uint8(noise&1)) != 0 {
+		phase |= 0xD0
+	} else {
+		phase |= 0x34
+	}
+	return phase
+}
+
+func oplRhythmSnarePhase(hhBit8 uint8, noise uint32) int {
+	out := (int(hhBit8) << 9) | (int(hhBit8^uint8(noise&1)) << 8)
+	return out
+}
+
+func oplRhythmTopCymbalPhase(rmXor uint8) int {
+	return (int(rmXor) << 9) | 0x80
+}
+
+func (o *Synth) rmXor() uint8 {
+	return (o.rmHHBit2 ^ o.rmHHBit7) |
+		(o.rmHHBit3 ^ o.rmTCBit5) |
+		(o.rmTCBit3 ^ o.rmTCBit5)
 }
 
 func oplBaseAndChannel(ch int) (base int, ci int) {
@@ -1338,6 +1661,10 @@ func clampPCM16(v int32) int16 {
 	return int16(v)
 }
 
+func feedbackSample(v int) int16 {
+	return clampPCM16(int32(v))
+}
+
 func lerpPCM16(prev int32, next int32, phase uint64) int32 {
 	return prev + int32((int64(next-prev)*int64(phase))>>32)
 }
@@ -1357,13 +1684,14 @@ func phaseModFromSample(op *impSynthOperatorState, sample float64) int {
 	return int(math.Round(sample * scale))
 }
 
-func oplFeedbackPhaseOffset(prev0, prev1 int, feedback uint8) int {
+func oplFeedbackPhaseOffset(prev0, prev1 int16, feedback uint8) int {
 	if feedback == 0 {
 		return 0
 	}
+	sum := int32(prev0) + int32(prev1)
 	shift := 9 - int(feedback)
 	if shift <= 0 {
-		return prev0 + prev1
+		return int(sum)
 	}
-	return (prev0 + prev1) / (1 << shift)
+	return int(sum >> shift)
 }

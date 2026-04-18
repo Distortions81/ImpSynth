@@ -57,10 +57,43 @@ func main() {
 ## API
 
 - `func New(sampleRate int) *Synth`
+- `func NewOPL2(sampleRate int) *Synth`
 - `func (*Synth) Reset()`
 - `func (*Synth) WriteReg(addr uint16, value uint8)`
 - `func (*Synth) GenerateStereoS16(frames int) []int16`
 - `func (*Synth) GenerateMonoU8(frames int) []byte`
+
+`NewOPL2` constrains the synth to AdLib/OPL2-style behavior: first-bank register
+surface only, dual-mono output, OPL2 waveform selection rules, and rhythm-mode
+support on `0xBD`.
+
+## OPL2 Findings
+
+The repository now includes shareware Wolf3D music fixtures under
+`testdata/wolf3d-shareware-music` plus `Nuked-OPL3` comparison tests for short
+real-song snippets.
+
+Current findings:
+
+- `02-untitled` previously had a clearly missing melodic lane on channel `2`.
+  That was a retrigger-state bug: silent non-sustaining notes could be dropped
+  while still in `sustain`, so later key-ons never restarted attack. The fix is
+  now covered by regression tests.
+- After that fix, the main weaker Wolf3D cases are again the shared melodic
+  `channel 1` family in `SUSPENSE`, `02-untitled`, `GETTHEM`, and `SEARCHN`.
+- That mismatch is not driven by rhythm mode. The remaining cluster points to
+  melodic FM behavior rather than missing percussion support.
+- The strongest remaining pattern is high-feedback melodic behavior on that
+  shared voice family, especially where songs switch to `0xC1 = 0x0e`.
+- `WONDERIN` and much of the DOOM shareware set remain very close to
+  `Nuked-OPL3`.
+
+Practical implication:
+
+- OPL2 playback is already close on several real shareware tracks.
+- The major “missing instrument” retrigger failure is fixed.
+- The next place to improve is the shared high-feedback melodic `channel 1`
+  family rather than drum mode for the current Wolf3D shareware coverage.
 
 ## Example Program
 

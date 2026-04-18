@@ -1,2 +1,4 @@
 .cache/
 *.test
+testdata/shareware-render-cache/*
+out/*

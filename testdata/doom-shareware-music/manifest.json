@@ -1,0 +1,72 @@
+{
+  "source": "DOOM1.WAD",
+  "format": "reg_le16,value_u8,delay_le16",
+  "tic_rate": 140,
+  "songs": [
+    {
+      "lump": "D_E1M1",
+      "file": "d_e1m1.seq",
+      "event_count": 44536
+    },
+    {
+      "lump": "D_E1M2",
+      "file": "d_e1m2.seq",
+      "event_count": 54942
+    },
+    {
+      "lump": "D_E1M3",
+      "file": "d_e1m3.seq",
+      "event_count": 63027
+    },
+    {
+      "lump": "D_E1M4",
+      "file": "d_e1m4.seq",
+      "event_count": 58043
+    },
+    {
+      "lump": "D_E1M5",
+      "file": "d_e1m5.seq",
+      "event_count": 46723
+    },
+    {
+      "lump": "D_E1M6",
+      "file": "d_e1m6.seq",
+      "event_count": 35721
+    },
+    {
+      "lump": "D_E1M7",
+      "file": "d_e1m7.seq",
+      "event_count": 35675
+    },
+    {
+      "lump": "D_E1M8",
+      "file": "d_e1m8.seq",
+      "event_count": 48388
+    },
+    {
+      "lump": "D_E1M9",
+      "file": "d_e1m9.seq",
+      "event_count": 65018
+    },
+    {
+      "lump": "D_INTER",
+      "file": "d_inter.seq",
+      "event_count": 90446
+    },
+    {
+      "lump": "D_INTRO",
+      "file": "d_intro.seq",
+      "event_count": 2623
+    },
+    {
+      "lump": "D_INTROA",
+      "file": "d_introa.seq",
+      "event_count": 1555
+    },
+    {
+      "lump": "D_VICTOR",
+      "file": "d_victor.seq",
+      "event_count": 55099
+    }
+  ]
+}
