@@ -57,10 +57,15 @@ func main() {
 ## API
 
 - `func New(sampleRate int) *Synth`
+- `func NewOPL2(sampleRate int) *Synth`
 - `func (*Synth) Reset()`
 - `func (*Synth) WriteReg(addr uint16, value uint8)`
 - `func (*Synth) GenerateStereoS16(frames int) []int16`
 - `func (*Synth) GenerateMonoU8(frames int) []byte`
+
+`NewOPL2` constrains the synth to AdLib/OPL2-style behavior: first-bank register
+surface only, dual-mono output, OPL2 waveform selection rules, and rhythm-mode
+support on `0xBD`.
 
 ## Example Program
 

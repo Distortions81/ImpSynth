@@ -1,20 +1,28 @@
 package impsynth
 
 import (
+	"bufio"
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
 var benchmarkVoiceChannels = []int{0, 1, 2}
 var benchmarkEightVoiceChannels = []int{0, 1, 2, 3, 4, 5, 6, 7}
 var benchmarkMaxVoiceChannels = []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
+
+var nukedDumpOnce sync.Once
+var nukedDumpPath string
+var nukedDumpErr error
 
 const (
 	exampleSongSampleRate = 44100
@@ -358,6 +366,264 @@ func TestGenerateStereoS16ReusesBuffer(t *testing.T) {
 	})
 	if allocs != 0 {
 		t.Fatalf("GenerateStereoS16 allocs=%v want 0", allocs)
+	}
+}
+
+func TestRhythmModeHighHatProducesPCMWithoutChannelKeyOn(t *testing.T) {
+	opl := New(49716)
+	opl.WriteReg(0x01, 0x20)
+	opl.WriteReg(0x31, 0x01)
+	opl.WriteReg(0x51, 0x00)
+	opl.WriteReg(0x71, 0xF4)
+	opl.WriteReg(0x91, 0x14)
+	opl.WriteReg(0xC7, 0x30)
+	opl.WriteReg(0xA7, 0x98)
+	opl.WriteReg(0xB7, 0x11)
+	opl.WriteReg(0xBD, 0x21)
+
+	if opl.ch[7].ops[0].keyMask&oplKeyMaskDrum == 0 {
+		t.Fatal("expected high-hat drum key to be active")
+	}
+
+	pcm := opl.GenerateStereoS16(256)
+	if !pcmHasSignal(pcm) {
+		t.Fatal("expected rhythm-mode high-hat output")
+	}
+}
+
+func TestRhythmModeOffClearsDrumKeys(t *testing.T) {
+	opl := New(49716)
+	opl.WriteReg(0x01, 0x20)
+	opl.WriteReg(0x30, 0x01)
+	opl.WriteReg(0x33, 0x01)
+	opl.WriteReg(0x50, 0x00)
+	opl.WriteReg(0x53, 0x00)
+	opl.WriteReg(0x70, 0xF4)
+	opl.WriteReg(0x73, 0xF4)
+	opl.WriteReg(0x90, 0x14)
+	opl.WriteReg(0x93, 0x14)
+	opl.WriteReg(0xC6, 0x30)
+	opl.WriteReg(0xA6, 0x98)
+	opl.WriteReg(0xB6, 0x11)
+	opl.WriteReg(0xBD, 0x30)
+
+	if opl.ch[6].ops[0].keyMask&oplKeyMaskDrum == 0 || opl.ch[6].ops[1].keyMask&oplKeyMaskDrum == 0 {
+		t.Fatal("expected bass drum key to be active")
+	}
+
+	opl.WriteReg(0xBD, 0x00)
+	if opl.ch[6].ops[0].keyMask != 0 || opl.ch[6].ops[1].keyMask != 0 {
+		t.Fatal("expected bass drum keys to clear when rhythm mode is disabled")
+	}
+}
+
+func TestNewOPL2IgnoresBank1Writes(t *testing.T) {
+	opl := NewOPL2(49716)
+	opl.WriteReg(0x120, 0x7F)
+	if opl.regs[0x120] != 0 {
+		t.Fatal("expected OPL2 mode to ignore bank 1 writes")
+	}
+}
+
+func TestNewOPL2ForcesDualMonoOutput(t *testing.T) {
+	opl := NewOPL2(49716)
+	opl.WriteReg(0x01, 0x20)
+	opl.WriteReg(0x20, 0x01)
+	opl.WriteReg(0x23, 0x01)
+	opl.WriteReg(0x43, 0x00)
+	opl.WriteReg(0x60, 0xF3)
+	opl.WriteReg(0x63, 0xF3)
+	opl.WriteReg(0x80, 0x24)
+	opl.WriteReg(0x83, 0x24)
+	opl.WriteReg(0xC0, 0x10)
+	opl.WriteReg(0xA0, 0x98)
+	opl.WriteReg(0xB0, 0x31)
+
+	pcm := opl.GenerateStereoS16(64)
+	for i := 0; i+1 < len(pcm); i += 2 {
+		if pcm[i] != pcm[i+1] {
+			t.Fatalf("expected dual-mono output in OPL2 mode at frame %d: %d != %d", i/2, pcm[i], pcm[i+1])
+		}
+	}
+}
+
+func TestNewOPL2WaveformSelectOffForcesWave0(t *testing.T) {
+	opl := NewOPL2(49716)
+	opl.WriteReg(0xE0, 0x03)
+	if got := opl.ch[0].ops[0].regWave; got != 0 {
+		t.Fatalf("waveform with select off = %d want 0", got)
+	}
+	opl.WriteReg(0x01, 0x20)
+	opl.WriteReg(0xE0, 0x07)
+	if got := opl.ch[0].ops[0].regWave; got != 0x03 {
+		t.Fatalf("waveform with select on = %d want 3", got)
+	}
+}
+
+func pcmHasSignal(pcm []int16) bool {
+	for _, s := range pcm {
+		if s != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func buildNukedDumpTool(t *testing.T) string {
+	t.Helper()
+	nukedDumpOnce.Do(func() {
+		out := filepath.Join(os.TempDir(), "nuked-opl3-dump-test")
+		cmd := exec.Command(
+			"gcc",
+			"-O2",
+			"-I", "third_party/nuked-opl3",
+			"-o", out,
+			"bench/nuked_opl3_dump.c",
+			"third_party/nuked-opl3/opl3.c",
+			"-lm",
+		)
+		cmd.Dir = "."
+		if output, err := cmd.CombinedOutput(); err != nil {
+			nukedDumpErr = fmt.Errorf("gcc failed: %w: %s", err, strings.TrimSpace(string(output)))
+		} else {
+			nukedDumpPath = out
+		}
+	})
+	if nukedDumpErr != nil {
+		t.Fatalf("build nuked dump tool: %v", nukedDumpErr)
+	}
+	return nukedDumpPath
+}
+
+func renderNukedPCM(t *testing.T, sampleRate int, frames int, regs []uint16) []int16 {
+	t.Helper()
+	tool := buildNukedDumpTool(t)
+	args := []string{strconv.Itoa(sampleRate), strconv.Itoa(frames)}
+	for i := 0; i+1 < len(regs); i += 2 {
+		args = append(args, strconv.FormatUint(uint64(regs[i]), 10), strconv.FormatUint(uint64(regs[i+1]), 10))
+	}
+	cmd := exec.Command(tool, args...)
+	cmd.Dir = "."
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run nuked dump tool: %v", err)
+	}
+
+	pcm := make([]int16, 0, frames*2)
+	scanner := bufio.NewScanner(strings.NewReader(string(output)))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) != 2 {
+			t.Fatalf("unexpected nuked output line: %q", scanner.Text())
+		}
+		left, err := strconv.Atoi(fields[0])
+		if err != nil {
+			t.Fatalf("parse left sample: %v", err)
+		}
+		right, err := strconv.Atoi(fields[1])
+		if err != nil {
+			t.Fatalf("parse right sample: %v", err)
+		}
+		pcm = append(pcm, int16(left), int16(right))
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan nuked output: %v", err)
+	}
+	if len(pcm) != frames*2 {
+		t.Fatalf("nuked pcm len=%d want=%d", len(pcm), frames*2)
+	}
+	return pcm
+}
+
+func renderImpSynthOPL2(sampleRate int, frames int, regs []uint16) []int16 {
+	opl := NewOPL2(sampleRate)
+	for i := 0; i+1 < len(regs); i += 2 {
+		opl.WriteReg(regs[i], uint8(regs[i+1]))
+	}
+	out := opl.GenerateStereoS16(frames)
+	pcm := make([]int16, len(out))
+	copy(pcm, out)
+	return pcm
+}
+
+func maxPCMDelta(a []int16, b []int16) int {
+	if len(a) != len(b) {
+		return int(^uint(0) >> 1)
+	}
+	max := 0
+	for i := range a {
+		d := int(a[i]) - int(b[i])
+		if d < 0 {
+			d = -d
+		}
+		if d > max {
+			max = d
+		}
+	}
+	return max
+}
+
+func monoAbsEnergy(pcm []int16) int64 {
+	var total int64
+	for i := 0; i+1 < len(pcm); i += 2 {
+		s := int64(pcm[i]+pcm[i+1]) / 2
+		if s < 0 {
+			s = -s
+		}
+		total += s
+	}
+	return total
+}
+
+func TestNewOPL2MelodicOutputTracksNuked(t *testing.T) {
+	regs := []uint16{
+		0x01, 0x20,
+		0x20, 0x01, 0x23, 0x01,
+		0x40, 0x08, 0x43, 0x00,
+		0x60, 0xF2, 0x63, 0xF2,
+		0x80, 0x24, 0x83, 0x24,
+		0xC0, 0x31,
+		0xA0, 0x98, 0xB0, 0x31,
+	}
+
+	got := renderImpSynthOPL2(49716, 64, regs)
+	want := renderNukedPCM(t, 49716, 64, regs)
+	if delta := maxPCMDelta(got, want); delta > 2048 {
+		t.Fatalf("OPL2 melodic delta too large: %d", delta)
+	}
+}
+
+func TestNewOPL2RhythmOutputComparableEnergyToNuked(t *testing.T) {
+	regs := []uint16{
+		0x01, 0x20,
+		0x30, 0x01, 0x33, 0x01,
+		0x31, 0x01, 0x34, 0x01,
+		0x32, 0x01, 0x35, 0x01,
+		0x50, 0x08, 0x53, 0x00,
+		0x51, 0x00, 0x54, 0x00,
+		0x52, 0x00, 0x55, 0x00,
+		0x70, 0xF4, 0x73, 0xF6,
+		0x71, 0xF4, 0x74, 0xF6,
+		0x72, 0xF4, 0x75, 0xF6,
+		0x90, 0x24, 0x93, 0x14,
+		0x91, 0x24, 0x94, 0x14,
+		0x92, 0x24, 0x95, 0x14,
+		0xC6, 0x31, 0xC7, 0x30, 0xC8, 0x30,
+		0xA6, 0x98, 0xB6, 0x11,
+		0xA7, 0x88, 0xB7, 0x11,
+		0xA8, 0x78, 0xB8, 0x11,
+		0xBD, 0x3F,
+	}
+
+	got := renderImpSynthOPL2(49716, 64, regs)
+	want := renderNukedPCM(t, 49716, 64, regs)
+	if !pcmHasSignal(got) || !pcmHasSignal(want) {
+		t.Fatal("expected both renderers to produce audible rhythm output")
+	}
+	gotEnergy := monoAbsEnergy(got)
+	wantEnergy := monoAbsEnergy(want)
+	if gotEnergy*4 < wantEnergy || wantEnergy*4 < gotEnergy {
+		t.Fatalf("rhythm energy diverged too far: got=%d want=%d", gotEnergy, wantEnergy)
 	}
 }
 
