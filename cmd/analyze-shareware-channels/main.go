@@ -354,40 +354,66 @@ func compareSong(plan songPlan, songIndex int, rendered map[int]map[int]map[stri
 	}
 
 	bySong := rendered[songIndex]
+	limit := runtime.NumCPU()
+	if limit < 1 {
+		limit = 1
+	}
+	swg := sizedwaitgroup.New(limit)
+	errCh := make(chan error, len(plan.channels))
+	metricCh := make(chan channelMetric, len(plan.channels))
+
 	for _, ch := range plan.channels {
-		pair := bySong[ch]
-		if pair == nil {
-			continue
-		}
-		gotPath := pair["impsynth"]
-		wantPath := pair["nuked"]
-		if gotPath == "" || wantPath == "" {
-			continue
-		}
-		got, err := readPCMFile(gotPath)
+		ch := ch
+		swg.Add()
+		go func() {
+			defer swg.Done()
+			pair := bySong[ch]
+			if pair == nil {
+				return
+			}
+			gotPath := pair["impsynth"]
+			wantPath := pair["nuked"]
+			if gotPath == "" || wantPath == "" {
+				return
+			}
+			got, err := readPCMFile(gotPath)
+			if err != nil {
+				errCh <- fmt.Errorf("read impsynth pcm for %s ch%d: %w", plan.label, ch, err)
+				return
+			}
+			want, err := readPCMFile(wantPath)
+			if err != nil {
+				errCh <- fmt.Errorf("read nuked pcm for %s ch%d: %w", plan.label, ch, err)
+				return
+			}
+			spec, gotEnergy, wantEnergy, maxDelta := compareWholeSongPCM(got, want)
+			if gotEnergy < minChunkEnergy && wantEnergy < minChunkEnergy {
+				return
+			}
+			ratio := 0.0
+			if wantEnergy > 0 {
+				ratio = float64(gotEnergy) / float64(wantEnergy)
+			}
+			metricCh <- channelMetric{
+				Channel:     ch,
+				Spec:        spec,
+				EnergyRatio: ratio,
+				MaxDelta:    maxDelta,
+				GotEnergy:   gotEnergy,
+				WantEnergy:  wantEnergy,
+			}
+		}()
+	}
+	swg.Wait()
+	close(errCh)
+	for err := range errCh {
 		if err != nil {
-			return songMetric{}, fmt.Errorf("read impsynth pcm for %s ch%d: %w", plan.label, ch, err)
+			return songMetric{}, err
 		}
-		want, err := readPCMFile(wantPath)
-		if err != nil {
-			return songMetric{}, fmt.Errorf("read nuked pcm for %s ch%d: %w", plan.label, ch, err)
-		}
-		spec, gotEnergy, wantEnergy, maxDelta := compareWholeSongPCM(got, want)
-		if gotEnergy < minChunkEnergy && wantEnergy < minChunkEnergy {
-			continue
-		}
-		ratio := 0.0
-		if wantEnergy > 0 {
-			ratio = float64(gotEnergy) / float64(wantEnergy)
-		}
-		out.Channels = append(out.Channels, channelMetric{
-			Channel:     ch,
-			Spec:        spec,
-			EnergyRatio: ratio,
-			MaxDelta:    maxDelta,
-			GotEnergy:   gotEnergy,
-			WantEnergy:  wantEnergy,
-		})
+	}
+	close(metricCh)
+	for metric := range metricCh {
+		out.Channels = append(out.Channels, metric)
 	}
 
 	for _, metric := range out.Channels {
