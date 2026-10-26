@@ -69,16 +69,16 @@ support on `0xBD`.
 
 ## OPL2 Findings
 
-The repository now includes shareware Wolf3D music fixtures under
-`testdata/wolf3d-shareware-music` plus `Nuked-OPL3` comparison tests for short
-real-song snippets.
+Music reference fixtures and tests that require them are local-only and are
+not distributed in this repository. The findings below describe earlier local
+comparisons with `Nuked-OPL3`.
 
 Current findings:
 
 - `02-untitled` previously had a clearly missing melodic lane on channel `2`.
   That was a retrigger-state bug: silent non-sustaining notes could be dropped
-  while still in `sustain`, so later key-ons never restarted attack. The fix is
-  now covered by regression tests.
+  while still in `sustain`, so later key-ons never restarted attack. The fix was
+  checked against local reference recordings.
 - After that fix, the main weaker Wolf3D cases are again the shared melodic
   `channel 1` family in `SUSPENSE`, `02-untitled`, `GETTHEM`, and `SEARCHN`.
 - That mismatch is not driven by rhythm mode. The remaining cluster points to

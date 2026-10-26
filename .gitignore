@@ -2,3 +2,8 @@
 *.test
 testdata/shareware-render-cache/*
 out/*
+
+# Local music references and fixture-dependent tests.
+/testdata/doom-shareware-music/
+/testdata/wolf3d-shareware-music/
+/.local-tests/
